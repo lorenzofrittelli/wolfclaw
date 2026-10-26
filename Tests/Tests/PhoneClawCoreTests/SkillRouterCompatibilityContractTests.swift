@@ -91,12 +91,16 @@ final class SkillRouterCompatibilityContractTests: XCTestCase {
 
     func testRemoteGatewaySecretsStayOutOfUserDefaultsAndPairingChecksOrigin() throws {
         let binding = try source("LLM/Backends/Remote/LANBinding.swift")
+        let bindingStore = try source("LLM/Backends/Remote/BindingStore.swift")
         let gateway = try source("LLM/Backends/Remote/MacGateway.swift")
 
-        XCTAssertTrue(binding.contains("RemoteBindingCredentialStore.saveBindingSecret"))
-        XCTAssertTrue(binding.contains("RemoteBindingCredentialStore.loadBindingSecret"))
-        XCTAssertTrue(binding.contains("copy.secret = \"\""))
-        XCTAssertTrue(binding.contains("RemoteBindingCredentialStore.deleteBindingSecret"))
+        // I test comportamentali del BindingStore coprono errori e metadati;
+        // qui verifichiamo che il percorso reale usi ancora il Keychain.
+        XCTAssertTrue(binding.contains("bindings.saveChecked("))
+        XCTAssertTrue(bindingStore.contains("credentials: BindingCredentialStorage = KeychainBindingCredentialStorage()"))
+        for api in ["SecItemCopyMatching(", "SecItemUpdate(", "SecItemAdd(", "SecItemDelete("] {
+            XCTAssertTrue(bindingStore.contains(api))
+        }
 
         XCTAssertTrue(gateway.contains("import Security"))
         XCTAssertTrue(gateway.contains("GatewayCredentialStore.savePairedDeviceToken"))

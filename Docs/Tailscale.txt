@@ -53,6 +53,8 @@ Usare il nome .ts.net completo, HTTPS e la porta corretta. Non aggiungere /v1, c
 
 Premere il pulsante di abbinamento e approvare sul Mac la richiesta del proprio iPhone. Non occorre copiare token: l'app verifica l'identità del gateway e conserva il segreto nel Portachiavi. Dopo la conferma, selezionare un modello remoto disponibile e inviare un messaggio di prova.
 
+Il gateway originale contiene ancora etichette in cinese. Nella richiesta di associazione, 允许 significa «Consenti» e 拒绝 significa «Rifiuta». Approvare solo la richiesta appena avviata dal proprio dispositivo.
+
 Il collegamento Tailscale conserva l'indirizzo HTTPS scelto; non ripiega su Bonjour o HTTP. Per passare allo stesso Mac tramite LAN occorre prima rimuovere l'abbinamento, poi rifarlo nel percorso LAN.
 
 5. Capire dove avviene l'inferenza
@@ -65,6 +67,8 @@ Il provider scelto nel gateway determina dove vengono elaborati i dati. Un provi
 6. Verificare o interrompere il collegamento
 
 Se il pairing fallisce, controllare in ordine: Tailscale connesso su entrambi i dispositivi; gateway in esecuzione sul loopback; proxy Serve e porta; nome HTTPS e certificato validi; regole di accesso della tailnet; richiesta approvata sul Mac. Se non compaiono modelli dopo il pairing, controllare il provider del gateway. Il modello Echo serve solo a provare il collegamento.
+
+Anche nel simulatore iOS il Portachiavi richiede una build firmata con gli entitlement dell'app. Una build eseguita con CODE_SIGNING_ALLOWED=NO può avviarsi ma fallire nel salvataggio delle credenziali (errore securityd -34018). Usare la firma ad hoc del simulatore generata da Xcode, poi rifare l'associazione. La compilazione senza firma resta utile per controllare il codice del target iPhone, ma non verifica il funzionamento del Portachiavi.
 
 Per interrompere esclusivamente il servizio aggiunto qui, dopo aver verificato che 8446 appartenga ancora a WolfClaw:
 

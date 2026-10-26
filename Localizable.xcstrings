@@ -873,6 +873,23 @@
           }
         }
       }
+    },
+    "remote.error.credentialStorage": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not save the credential in Keychain. Pairing was not changed. Please try again."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Impossibile salvare la credenziale nel portachiavi. L’associazione non è stata modificata. Riprova."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

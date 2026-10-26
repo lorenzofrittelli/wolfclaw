@@ -1,6 +1,5 @@
 import Foundation
 import Network
-import Security
 
 // MARK: - LAN Binding (连接链路 · 第二层)
 //
@@ -14,204 +13,6 @@ import Security
 //
 // secret:配对握手时跟 Mac 换得。持久化时只进 Keychain,UserDefaults 只保留
 // macID/name/endpoint 这些非秘密元数据。
-
-/// 绑定持久化。UserDefaults JSON 只保存非秘密元数据;secret/token 存 Keychain。
-final class BindingStore {
-    struct Snapshot {
-        let binding: MacBinding
-        fileprivate let revision: UUID
-    }
-
-    static let defaultsKey = "PhoneClaw.remote.bindings"
-    private let defaults: UserDefaults
-    private let lock = NSRecursiveLock()
-    private var revisions: [String: UUID] = [:]
-    private var pairingRevision = UUID()
-    init(defaults: UserDefaults = .standard) { self.defaults = defaults }
-
-    func all() -> [MacBinding] {
-        lock.lock(); defer { lock.unlock() }
-        guard let data = defaults.data(forKey: Self.defaultsKey),
-              let list = try? JSONDecoder().decode([MacBinding].self, from: data) else { return [] }
-
-        var needsScrub = false
-        let hydrated = list.map { stored -> MacBinding in
-            var binding = stored
-            if let secret = RemoteBindingCredentialStore.loadBindingSecret(macID: binding.macID), !secret.isEmpty {
-                binding.secret = secret
-            } else {
-                let legacySecret = binding.secret.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !legacySecret.isEmpty && legacySecret != "(pending-handshake)" {
-                    RemoteBindingCredentialStore.saveBindingSecret(legacySecret, macID: binding.macID)
-                    binding.secret = legacySecret
-                    needsScrub = true
-                }
-            }
-            if !stored.secret.isEmpty {
-                needsScrub = true
-            }
-            return binding
-        }
-        if needsScrub {
-            persist(hydrated)
-        }
-        return hydrated
-    }
-
-    func binding(macID: String) -> MacBinding? { all().first { $0.macID == macID } }
-
-    func snapshot(macID: String) -> Snapshot? {
-        lock.lock(); defer { lock.unlock() }
-        guard let binding = binding(macID: macID) else { return nil }
-        let revision = revisions[macID] ?? UUID()
-        revisions[macID] = revision
-        return Snapshot(binding: binding, revision: revision)
-    }
-
-    func snapshot(matching expected: MacBinding) -> Snapshot? {
-        lock.lock(); defer { lock.unlock() }
-        guard let snapshot = snapshot(macID: expected.macID),
-              snapshot.binding.boundAt == expected.boundAt,
-              snapshot.binding.transport == expected.transport,
-              expected.transport != .tailscale || snapshot.binding.endpoint == expected.endpoint,
-              LANIdentityProof.usableSecret(snapshot.binding.secret) == LANIdentityProof.usableSecret(expected.secret) else { return nil }
-        return snapshot
-    }
-
-    func isCurrent(_ snapshot: Snapshot) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        guard revisions[snapshot.binding.macID] == snapshot.revision,
-              let current = binding(macID: snapshot.binding.macID) else { return false }
-        return current.boundAt == snapshot.binding.boundAt
-            && current.transport == snapshot.binding.transport
-            && (current.transport != .tailscale || current.endpoint == snapshot.binding.endpoint)
-            && LANIdentityProof.usableSecret(current.secret) == LANIdentityProof.usableSecret(snapshot.binding.secret)
-    }
-
-    /// Il recupero dell'IP aggiorna solo metadati: non può ricreare un pairing o riscrivere una credenziale.
-    func refreshEndpoint(_ endpoint: String, ifCurrent snapshot: Snapshot) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        guard isCurrent(snapshot) else { return false }
-        var list = all()
-        guard let index = list.firstIndex(where: { $0.macID == snapshot.binding.macID }) else { return false }
-        if list[index].transport == .tailscale {
-            // La verifica non modifica mai l'origine HTTPS fissata durante il pairing.
-            return list[index].endpoint.flatMap(LANEndpointPolicy.tailscaleRoot)?.absoluteString == endpoint
-        }
-        list[index].endpoint = endpoint
-        persist(list)
-        return true
-    }
-
-    func revisionForPairing() -> UUID {
-        lock.lock(); defer { lock.unlock() }
-        return pairingRevision
-    }
-
-    @discardableResult
-    func save(_ binding: MacBinding, ifRevision expectedRevision: UUID? = nil) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        guard expectedRevision == nil || expectedRevision == pairingRevision,
-              MacBindingTransport.permitsReplacement(existing: self.binding(macID: binding.macID)?.transport,
-                                                       proposed: binding.transport) else { return false }
-        if binding.transport == .tailscale {
-            guard let endpoint = binding.endpoint,
-                  LANEndpointPolicy.tailscaleRoot(endpoint)?.absoluteString == endpoint else { return false }
-        }
-        pairingRevision = UUID()
-        revisions[binding.macID] = UUID()
-        let secret = binding.secret.trimmingCharacters(in: .whitespacesAndNewlines)
-        if secret.isEmpty || secret == "(pending-handshake)" {
-            RemoteBindingCredentialStore.deleteBindingSecret(macID: binding.macID)
-        } else {
-            RemoteBindingCredentialStore.saveBindingSecret(secret, macID: binding.macID)
-        }
-        var list = all().filter { $0.macID != binding.macID }
-        list.append(binding)
-        persist(list)
-        return true
-    }
-
-    func remove(macID: String) {
-        lock.lock(); defer { lock.unlock() }
-        pairingRevision = UUID()
-        revisions[macID] = UUID()
-        let remaining = all().filter { $0.macID != macID }
-        RemoteBindingCredentialStore.deleteBindingSecret(macID: macID)
-        persist(remaining)
-    }
-
-    private func persist(_ list: [MacBinding]) {
-        let scrubbed = list.map { binding -> MacBinding in
-            var copy = binding
-            copy.secret = ""
-            return copy
-        }
-        if let data = try? JSONEncoder().encode(scrubbed) {
-            defaults.set(data, forKey: Self.defaultsKey)
-        }
-    }
-}
-
-private enum RemoteBindingCredentialStore {
-    private static let service = "ai.phoneclaw.remote.bindings"
-
-    static func loadBindingSecret(macID: String) -> String? {
-        load(account: macID)
-    }
-
-    @discardableResult
-    static func saveBindingSecret(_ secret: String, macID: String) -> Bool {
-        save(secret, account: macID)
-    }
-
-    @discardableResult
-    static func deleteBindingSecret(macID: String) -> Bool {
-        delete(account: macID)
-    }
-
-    private static func load(account: String) -> String? {
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(baseQuery(account: account, returningData: true) as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-
-    @discardableResult
-    private static func save(_ value: String, account: String) -> Bool {
-        let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return delete(account: account) }
-        let data = Data(clean.utf8)
-        let query = baseQuery(account: account, returningData: false)
-        let updateStatus = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-        if updateStatus == errSecSuccess { return true }
-        guard updateStatus == errSecItemNotFound else { return false }
-
-        var addQuery = query
-        addQuery[kSecValueData as String] = data
-        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        return SecItemAdd(addQuery as CFDictionary, nil) == errSecSuccess
-    }
-
-    @discardableResult
-    private static func delete(account: String) -> Bool {
-        let status = SecItemDelete(baseQuery(account: account, returningData: false) as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
-    }
-
-    private static func baseQuery(account: String, returningData: Bool) -> [String: Any] {
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        if returningData {
-            query[kSecReturnData as String] = true
-            query[kSecMatchLimit as String] = kSecMatchLimitOne
-        }
-        return query
-    }
-}
 
 // MARK: - Connection Manager (发现 + 绑定 + 重连)
 
@@ -491,7 +292,13 @@ final class LANConnectionManager {
     private func savePairing(_ binding: MacBinding, operation: PairingOperation) -> Bool {
         pairingLock.lock(); defer { pairingLock.unlock() }
         guard pairingIsCurrent(operation.id) else { return false }
-        guard bindings.save(binding, ifRevision: operation.storeRevision) else {
+        do {
+            try bindings.saveChecked(binding, ifRevision: operation.storeRevision)
+        } catch BindingStore.SaveError.credentialStorage {
+            failPairing(operation.id, key: "remote.error.credentialStorage",
+                        message: "Impossibile salvare la credenziale nel portachiavi. L’associazione non è stata modificata. Riprova.")
+            return false
+        } catch {
             failPairing(operation.id, key: "remote.error.pairingChanged", message: "Associazione annullata o modificata. Riprova.")
             return false
         }
