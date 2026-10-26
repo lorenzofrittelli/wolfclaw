@@ -232,6 +232,14 @@
 		A7C100000000000000000003 /* PhoneClawLiveActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C200000000000000000003 /* PhoneClawLiveActivityWidget.swift */; };
 		A7C100000000000000000005 /* PhoneClawLiveActivityWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A7C200000000000000000005 /* PhoneClawLiveActivityWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BB7100000000000000000002 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB7100000000000000000001 /* Assets.xcassets */; };
+		E358AF39109BF18189E5E4C2 /* ToolConfirmationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35F2621AF392B41F723693FE /* ToolConfirmationState.swift */; };
+		C78F16DA1E7FBEAAA1584312 /* ToolCallOutputPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCFE6E03AB087C53A33D6021 /* ToolCallOutputPolicy.swift */; };
+		17DD2402DC2749A12F0FAB5E /* ContactUpdatePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34412CFAB44DDBFF5BF1AE25 /* ContactUpdatePolicy.swift */; };
+		C973142F9DE220C769AB832D /* LANEndpointPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF1315C4283CE3B939EF7685 /* LANEndpointPolicy.swift */; };
+		69FB23F6A810A67308A8224C /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 51AEFC166F1FD44FF8940C24 /* Localizable.xcstrings */; };
+		C1E6AB150BB6A0A4DF366DAB /* ToolArgumentValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D14274C7C1BEF2ED5E1CE1FA /* ToolArgumentValidator.swift */; };
+		B03C89A4E84C53C913F06703 /* PriorContextPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6F901E82D439A378210322D /* PriorContextPolicy.swift */; };
+		2E32B61B3E6A16594E4BB51A /* ArithmeticEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F09D42CF0B1E19791AE4338E /* ArithmeticEvaluator.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -428,6 +436,14 @@
 		A7C200000000000000000004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A7C200000000000000000005 /* PhoneClawLiveActivityWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = PhoneClawLiveActivityWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB7100000000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		35F2621AF392B41F723693FE /* ToolConfirmationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ToolConfirmationState.swift; path = Agent/Engine/ToolConfirmationState.swift; sourceTree = SOURCE_ROOT; };
+		CCFE6E03AB087C53A33D6021 /* ToolCallOutputPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ToolCallOutputPolicy.swift; path = Agent/Engine/ToolCallOutputPolicy.swift; sourceTree = SOURCE_ROOT; };
+		34412CFAB44DDBFF5BF1AE25 /* ContactUpdatePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ContactUpdatePolicy.swift; path = Tools/Handlers/ContactUpdatePolicy.swift; sourceTree = SOURCE_ROOT; };
+		BF1315C4283CE3B939EF7685 /* LANEndpointPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = LANEndpointPolicy.swift; path = LLM/Backends/Remote/LANEndpointPolicy.swift; sourceTree = SOURCE_ROOT; };
+		51AEFC166F1FD44FF8940C24 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; name = Localizable.xcstrings; path = Localizable.xcstrings; sourceTree = SOURCE_ROOT; };
+		D14274C7C1BEF2ED5E1CE1FA /* ToolArgumentValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ToolArgumentValidator.swift; path = Tools/ToolArgumentValidator.swift; sourceTree = SOURCE_ROOT; };
+		A6F901E82D439A378210322D /* PriorContextPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PriorContextPolicy.swift; path = Agent/Engine/PriorContextPolicy.swift; sourceTree = SOURCE_ROOT; };
+		F09D42CF0B1E19791AE4338E /* ArithmeticEvaluator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ArithmeticEvaluator.swift; path = Tools/Handlers/ArithmeticEvaluator.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -753,6 +769,14 @@
 				F8D921B323B9D6342A22A29E /* LiveAudioIO.swift */,
 				83C5B0E5FD420CCB6BD8D1A4 /* LiveModeEngine.swift */,
 				840B21562E52B6B93D4410D0 /* LiveModeUI.swift */,
+				35F2621AF392B41F723693FE /* ToolConfirmationState.swift */,
+				CCFE6E03AB087C53A33D6021 /* ToolCallOutputPolicy.swift */,
+				34412CFAB44DDBFF5BF1AE25 /* ContactUpdatePolicy.swift */,
+				BF1315C4283CE3B939EF7685 /* LANEndpointPolicy.swift */,
+				51AEFC166F1FD44FF8940C24 /* Localizable.xcstrings */,
+				D14274C7C1BEF2ED5E1CE1FA /* ToolArgumentValidator.swift */,
+				F09D42CF0B1E19791AE4338E /* ArithmeticEvaluator.swift */,
+				A6F901E82D439A378210322D /* PriorContextPolicy.swift */,
 				52F30C6348B834E5D157205F /* Info.plist */,
 				B1A2C3D4E5F607182930C000 /* InfoPlist.strings */,
 				38FC1001EB728212335AC141 /* PhoneClaw.entitlements */,
@@ -964,6 +988,7 @@
 				B1A2C3D4E5F607182930B100 /* Library in Resources */,
 				B1A2C3D4E5F607182930B107 /* piz_compressed.exr in Resources */,
 				B1A2C3D4E5F607182930B108 /* studio_env.hdr in Resources */,
+				69FB23F6A810A67308A8224C /* Localizable.xcstrings in Resources */,
 				B1A2C3D4E5F607182930C002 /* InfoPlist.strings in Resources */,
 				AA1000000000000000000033 /* open_jtalk_dic_utf_8-1.11 in Resources */,
 			);
@@ -1245,6 +1270,13 @@
 				D0B100000000000000000007 /* ResumableAssetDownloader.swift in Sources */,
 				BB2000000000000000000012 /* PCLog.swift in Sources */,
 				BB2000000000000000000100 /* LanguageService.swift in Sources */,
+				E358AF39109BF18189E5E4C2 /* ToolConfirmationState.swift in Sources */,
+				C78F16DA1E7FBEAAA1584312 /* ToolCallOutputPolicy.swift in Sources */,
+				17DD2402DC2749A12F0FAB5E /* ContactUpdatePolicy.swift in Sources */,
+				C973142F9DE220C769AB832D /* LANEndpointPolicy.swift in Sources */,
+				C1E6AB150BB6A0A4DF366DAB /* ToolArgumentValidator.swift in Sources */,
+				2E32B61B3E6A16594E4BB51A /* ArithmeticEvaluator.swift in Sources */,
+				B03C89A4E84C53C913F06703 /* PriorContextPolicy.swift in Sources */,
 				BB2000000000000000000101 /* L10n.swift in Sources */,
 				BB2000000000000000000102 /* PromptLocale.swift in Sources */,
 			);

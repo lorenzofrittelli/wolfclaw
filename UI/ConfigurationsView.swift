@@ -865,7 +865,7 @@ struct ConfigurationsView: View {
             return runtimeLabel(
                 zh: "已加载",
                 en: "Loaded",
-                backend: includeBackend ? engine.config.preferredBackend : nil
+                backend: includeBackend ? engine.coordinator.activeBackend : nil
             )
         case .loading(let modelID, _):
             guard modelID == model.id else { return nil }
@@ -1618,7 +1618,9 @@ struct ConfigurationsView: View {
         _ = engine.reconcileSelectedModelIfUnavailable()
         liveDownloader.refreshState()
         selectedModelID = resolvedInitialModelID()
-        preferredBackend = engine.config.preferredBackend
+        // Il selettore parte dal motore realmente caricato: dopo il fallback
+        // E4B a CPU deve essere possibile scegliere nuovamente GPU.
+        preferredBackend = engine.coordinator.activeBackend ?? engine.config.preferredBackend
         enableSpeculativeDecoding = engine.config.enableSpeculativeDecoding
         systemPrompt = engine.config.systemPrompt
         modelSelectionMessage = nil
@@ -1665,7 +1667,11 @@ struct ConfigurationsView: View {
 
     private func applySettings() -> Bool {
         let modelChanged = engine.config.selectedModelID != selectedModelID
-        let backendChanged = engine.config.preferredBackend != preferredBackend
+        let selectedArtifact = engine.availableModels.first(where: { $0.id == selectedModelID })?.artifactKind
+        let activeBackendMismatch = selectedArtifact == .litertlmFile
+            && engine.coordinator.sessionState.activeModelID == selectedModelID
+            && engine.coordinator.activeBackend.map { $0 != preferredBackend } == true
+        let backendChanged = engine.config.preferredBackend != preferredBackend || activeBackendMismatch
 
         guard let selectedModel = engine.availableModels.first(where: { $0.id == selectedModelID }),
               !selectedModel.requiresLocalArtifact || engine.installer.artifactPath(for: selectedModel) != nil else {

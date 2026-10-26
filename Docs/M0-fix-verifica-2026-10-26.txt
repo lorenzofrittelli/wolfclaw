@@ -1,0 +1,38 @@
+WolfClaw — milestone M0-fix, verifica del 26 ottobre 2026
+
+ESITO
+Correzioni della base PhoneClaw implementate e verificate. Le milestone funzionali WolfClaw successive non fanno parte di questo intervento.
+
+CORREZIONI
+- Conferma esplicita nell'interfaccia per scritture native e azioni distruttive, comune al percorso normale e al planner. Conferma monouso legata a argomenti, turno e sessione, con scadenza. Stop, cambio chat e disattivazione annullano la richiesta.
+- Il planner è cancellabile; dopo Stop non può ripartire il fallback. Gli handler ricontrollano la cancellazione prima della scrittura, anche dopo il consenso di sistema.
+- Aggiornamento contatti conservativo: preserva nomi, numeri, email ed etichette esistenti; rifiuta corrispondenze ambigue. Test su oggetti in memoria, senza modificare la rubrica personale.
+- Validazione dei parametri e conversione sicura degli interi: numeri enormi non provocano trap nel calendario.
+- Corretto il calcolo del margine di memoria nel simulatore. I follow-up mantengono richiesta di origine e contesto recente entro un budget, invece della sola ultima risposta.
+- Le sonde del router ricreano la sessione KV con i parametri temporanei e ripristinano poi quelli ordinari.
+- Calcolo locale per richieste aritmetiche isolate IT/EN: precedenza, parentesi, unari e decimali, senza eval o esecuzione di codice. Limiti: 256 caratteri e 128 token. Divisione per zero, overflow e precisione insufficiente producono un errore; risultati non rappresentabili esattamente, come 1/3, vengono rifiutati. Le richieste fuori dalla grammatica riconosciuta proseguono nel normale flusso LLM.
+- Le chiamate a strumenti malformate generano un errore leggibile invece di una risposta vuota.
+- Il selettore CPU/GPU riflette il backend attivo, inclusi i fallback.
+- Log di debug liberi esclusi dalla Release e marcati privati; eliminata la stampa del contenuto in alcuni punti del percorso testuale.
+- Connessione Mac: risoluzione Bonjour per identità stabile, verifica HMAC con nonce prima dell'invio del Bearer, rifiuto dei redirect e del downgrade HTTPS, invalidazione delle richieste dopo unpair/re-pair. IP salvato usato solo dopo verifica, mai come identità.
+- Allineati i contratti di test e le skill contatti/traduzione tra le lingue.
+
+VERIFICHE
+- Suite Core: 182 test passati, 0 falliti.
+- Suite MacGateway: 3 test passati, 0 falliti.
+- Build Debug per simulatore iPhone 18 Pro Max / iOS 27.0: riuscita.
+- Build Debug generic iOS senza firma: riuscita.
+- Build Release simulatore: riuscita; runtime Release non eseguito.
+- Controllo sincronizzazione skill e git diff --check: superati.
+- Modello locale: Gemma 4 E4B, CPU nel simulatore.
+- Prova conversazione: dopo memorizzazione di FALCO-27 e risposta OK, la domanda successiva restituisce FALCO-27. La conversazione resta presente dopo riavvio della app.
+- Calcoli nel simulatore: 7 per 8 -> 56; 12*(3+4) -> 84; 1/0 -> errore italiano controllato.
+- Scrittura appunti di prova: Annulla -> operazione interrotta; Conferma -> Copied to the clipboard. Non sono stati usati dati personali per questa prova.
+- Stop durante la preparazione della generazione: transazione terminata userCancelled, nessuna ripartenza automatica osservata; il messaggio successivo riceve PRONTO.
+- Impostazioni: Loaded CPU e selettore CPU coerenti, verificati visivamente.
+
+MIGRAZIONE MAC E LIMITI
+Aggiornare sia l'app sia il gateway Mac: la nuova app rifiuta gateway che non espongono /identity, prima di trasmettere il Bearer. I binding con macID stabile e token valido restano riutilizzabili con il gateway aggiornato; i vecchi binding basati solo sul nome Bonjour richiedono nuovo pairing.
+La verifica HMAC protegge dal riutilizzo accidentale dell'IP e dai proof registrati. HTTP resta in chiaro: questa modifica NON protegge da intercettazione, relay o MITM attivo e NON sostituisce TLS. La migrazione a TLS con identità persistente e verifica della chiave deve ancora essere realizzata e validata sui due dispositivi.
+Non sono stati verificati firma Apple, installazione su iPhone fisico, GPU/Neural Engine reali, TCC della rubrica/calendario su dispositivo, audio/camera o connessione end-to-end con un secondo Mac. Le build ereditano warning esistenti (Swift 6, deprecazioni MLX, script Xcode), senza errori di compilazione.
+Le prove locali non dimostrano l'accuratezza generale del modello né una copertura esaustiva di tutte le funzioni.

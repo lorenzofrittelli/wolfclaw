@@ -1,5 +1,10 @@
 import Foundation
 
+private struct ToolExecutionAuthorizationError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
 // MARK: - Engine Lifecycle
 //
 // 从 AgentEngine 主文件提取的生命周期管理方法:
@@ -19,6 +24,7 @@ extension AgentEngine {
     }
 
     func reloadSkills() {
+        cancelPendingToolConfirmation()
         let enabledState = Dictionary(uniqueKeysWithValues: skillEntries.map { ($0.id, $0.isEnabled) })
         loadSkillEntries()
         for i in skillEntries.indices {
@@ -75,14 +81,154 @@ extension AgentEngine {
     }
 
     func handleToolExecution(toolName: String, args: [String: Any]) async throws -> String {
-        return try await toolRegistry.execute(name: toolName, args: args)
+        let operation = try await authorizeToolExecution(toolName: toolName, args: args)
+        return try await toolRegistry.execute(name: operation.name, args: operation.arguments)
     }
 
     func handleToolExecutionCanonical(
         toolName: String,
         args: [String: Any]
     ) async throws -> CanonicalToolResult {
-        try await toolRegistry.executeCanonical(name: toolName, args: args)
+        let operation = try await authorizeToolExecution(toolName: toolName, args: args)
+        return try await toolRegistry.executeCanonical(name: operation.name, args: operation.arguments)
+    }
+
+    /// Gate comune a planner, percorso normale e recuperi: la decisione del modello non è un'autorizzazione.
+    private func authorizeToolExecution(
+        toolName: String,
+        args: [String: Any]
+    ) async throws -> (name: String, arguments: [String: Any]) {
+        try Task.checkCancellation()
+        let sessionID = sessionStore.currentSessionID
+        let turnID = activeTurnContext?.transactionID
+        let tool = try validatedExecutableTool(named: toolName, arguments: args)
+        guard JSONSerialization.isValidJSONObject(args),
+              let data = try? JSONSerialization.data(withJSONObject: args, options: [.sortedKeys]),
+              let arguments = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let argumentsJSON = String(data: data, encoding: .utf8),
+              let skillID = skillRegistry.findSkillId(forTool: tool.name),
+              let definition = skillRegistry.getDefinition(skillID) else {
+            throw ToolExecutionAuthorizationError(message: tr(
+                "工具参数无效，操作已停止。", "Invalid tool arguments. The action was stopped."
+            ))
+        }
+
+        let userQuestion = messages.last(where: { $0.role == .user })?.content ?? ""
+        if let reason = toolSideEffectPreflightFailure(
+            skillId: skillID,
+            toolName: tool.name,
+            arguments: arguments,
+            userQuestion: userQuestion
+        ) {
+            throw ToolExecutionAuthorizationError(message: reason)
+        }
+
+        let policy = definition.metadata.sideEffects.effectivePolicy(forTool: tool.name)
+        if ToolConfirmationPolicy.requiresConfirmation(
+            toolName: tool.name,
+            declaredLevel: policy.level.rawValue,
+            requiresExplicitIntent: policy.requiresExplicitIntent,
+            confirmation: policy.confirmation.rawValue
+        ) {
+            guard toolConfirmationUIEnabled else {
+                throw ToolExecutionAuthorizationError(message: tr(
+                    "此操作需要在应用前台确认，尚未执行。",
+                    "This action needs confirmation in the foreground app and has not been performed."
+                ))
+            }
+            let now = Date()
+            let request = ToolConfirmationRequest(
+                id: UUID(), sessionID: sessionID, turnID: turnID,
+                toolName: tool.name, argumentsJSON: argumentsJSON,
+                title: L10n.Action.title,
+                message: toolConfirmationMessage(toolName: tool.name, arguments: arguments),
+                isDestructive: ToolConfirmationPolicy.isDestructive(
+                    toolName: tool.name, declaredLevel: policy.level.rawValue
+                ),
+                createdAt: now, expiresAt: now.addingTimeInterval(120)
+            )
+            guard await awaitToolConfirmation(request) else {
+                throw ToolExecutionAuthorizationError(message: tr(
+                    "操作未获确认，已停止。", "The action was not confirmed and was stopped.",
+                    "操作は確認されなかったため中止しました。"
+                ))
+            }
+        }
+
+        // Dopo l'attesa ricontrolliamo anche le skill: possono essere state disattivate dalla UI.
+        try Task.checkCancellation()
+        guard sessionID == sessionStore.currentSessionID,
+              turnID == activeTurnContext?.transactionID else { throw CancellationError() }
+        _ = try validatedExecutableTool(named: tool.name, arguments: arguments)
+        return (tool.name, arguments)
+    }
+
+    private func validatedExecutableTool(named name: String, arguments: [String: Any]) throws -> RegisteredTool {
+        guard let tool = toolRegistry.find(name: name),
+              let skillID = skillRegistry.findSkillId(forTool: tool.name),
+              skillEntries.contains(where: { $0.id == skillID && $0.isEnabled }),
+              let definition = skillRegistry.getDefinition(skillID),
+              definition.metadata.allowedTools.contains(where: { toolRegistry.find(name: $0)?.name == tool.name }),
+              tool.validates(arguments: arguments) else {
+            throw ToolExecutionAuthorizationError(message: tr(
+                "工具未启用或参数无效，操作已停止。",
+                "The tool is disabled or its arguments are invalid. The action was stopped."
+            ))
+        }
+        return tool
+    }
+
+    private func toolConfirmationMessage(toolName: String, arguments: [String: Any]) -> String {
+        let action: String
+        switch toolName {
+        case "contacts-delete": action = L10n.Action.deleteContact
+        case "contacts-upsert": action = L10n.Action.saveContact
+        case "calendar-create-event": action = L10n.Action.createEvent
+        case "reminders-create": action = L10n.Action.createReminder
+        case "clipboard-write": action = L10n.Action.replaceClipboard
+        default: action = findDisplayName(for: toolName)
+        }
+        let details = arguments.keys.sorted().map { key in "\(key): \(arguments[key]!)" }.joined(separator: "\n")
+        return "\(action)\n\n\(details)"
+    }
+
+    private func awaitToolConfirmation(_ request: ToolConfirmationRequest) async -> Bool {
+        await withTaskCancellationHandler {
+            guard !Task.isCancelled, toolConfirmationUIEnabled,
+                  toolConfirmationState.begin(request) else { return false }
+            return await withCheckedContinuation { continuation in
+                toolConfirmationContinuation = (request.id, continuation)
+                toolConfirmationTimeoutTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(120))
+                    guard !Task.isCancelled else { return }
+                    self?.cancelPendingToolConfirmation(id: request.id)
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.cancelPendingToolConfirmation(id: request.id) }
+        }
+    }
+
+    func resolveToolConfirmation(id: UUID, approved: Bool) {
+        guard let permitted = toolConfirmationState.resolve(
+            id: id, approved: approved && toolConfirmationUIEnabled,
+            sessionID: sessionStore.currentSessionID,
+            turnID: activeTurnContext?.transactionID
+        ) else { return }
+        resumeToolConfirmation(id: id, approved: permitted)
+    }
+
+    func cancelPendingToolConfirmation(id: UUID? = nil) {
+        guard let request = toolConfirmationState.cancel(id: id) else { return }
+        resumeToolConfirmation(id: request.id, approved: false)
+    }
+
+    private func resumeToolConfirmation(id: UUID, approved: Bool) {
+        toolConfirmationTimeoutTask?.cancel()
+        toolConfirmationTimeoutTask = nil
+        guard let pending = toolConfirmationContinuation, pending.id == id else { return }
+        toolConfirmationContinuation = nil
+        pending.continuation.resume(returning: approved)
     }
 
     // MARK: - 初始化
@@ -303,6 +449,7 @@ extension AgentEngine {
     }
 
     func reloadModel() {
+        cancelPendingToolConfirmation()
         reconcileSelectedModelIfUnavailable(refreshInstallStates: true)
         let selectedModelID = config.selectedModelID
         let backend = config.preferredBackend
@@ -414,6 +561,7 @@ extension AgentEngine {
     }
 
     func cancelActiveGeneration() {
+        cancelPendingToolConfirmation()
         guard isProcessing || isModelGenerating || inference.isGenerating || coordinator.currentTransaction != nil else { return }
 
         activeTurnTask?.cancel()
@@ -449,6 +597,7 @@ extension AgentEngine {
     }
 
     func startNewSession() {
+        cancelPendingToolConfirmation()
         sessionStore.flushPendingSave(messages: messagesForPersistence())
         if isProcessing || inference.isGenerating {
             cancelActiveGeneration()
@@ -469,6 +618,7 @@ extension AgentEngine {
 
     func loadSession(id: UUID) {
         guard id != sessionStore.currentSessionID || messages.isEmpty else { return }
+        cancelPendingToolConfirmation()
         sessionStore.flushPendingSave(messages: messagesForPersistence())
         if isProcessing || inference.isGenerating {
             cancelActiveGeneration()
@@ -489,6 +639,7 @@ extension AgentEngine {
     func deleteSession(id: UUID) {
         let deletingCurrentSession = id == sessionStore.currentSessionID
         if deletingCurrentSession {
+            cancelPendingToolConfirmation()
             sessionStore.flushPendingSave(messages: messagesForPersistence())
             if isProcessing || inference.isGenerating || coordinator.currentTransaction != nil {
                 cancelActiveGeneration()
@@ -512,6 +663,7 @@ extension AgentEngine {
     }
 
     func setSkill(id: String, enabled: Bool) {
+        if !enabled { cancelPendingToolConfirmation() }
         if let index = skillEntries.firstIndex(where: { $0.id == id }) {
             skillEntries[index].isEnabled = enabled
         }

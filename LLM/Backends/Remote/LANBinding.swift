@@ -25,11 +25,19 @@ struct MacBinding: Codable, Equatable, Sendable {
 
 /// 绑定持久化。UserDefaults JSON 只保存非秘密元数据;secret/token 存 Keychain。
 final class BindingStore {
+    struct Snapshot {
+        let binding: MacBinding
+        fileprivate let revision: UUID
+    }
+
     static let defaultsKey = "PhoneClaw.remote.bindings"
     private let defaults: UserDefaults
+    private let lock = NSRecursiveLock()
+    private var revisions: [String: UUID] = [:]
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
     func all() -> [MacBinding] {
+        lock.lock(); defer { lock.unlock() }
         guard let data = defaults.data(forKey: Self.defaultsKey),
               let list = try? JSONDecoder().decode([MacBinding].self, from: data) else { return [] }
 
@@ -59,7 +67,44 @@ final class BindingStore {
 
     func binding(macID: String) -> MacBinding? { all().first { $0.macID == macID } }
 
+    func snapshot(macID: String) -> Snapshot? {
+        lock.lock(); defer { lock.unlock() }
+        guard let binding = binding(macID: macID) else { return nil }
+        let revision = revisions[macID] ?? UUID()
+        revisions[macID] = revision
+        return Snapshot(binding: binding, revision: revision)
+    }
+
+    func snapshot(matching expected: MacBinding) -> Snapshot? {
+        lock.lock(); defer { lock.unlock() }
+        guard let snapshot = snapshot(macID: expected.macID),
+              snapshot.binding.boundAt == expected.boundAt,
+              LANIdentityProof.usableSecret(snapshot.binding.secret) == LANIdentityProof.usableSecret(expected.secret) else { return nil }
+        return snapshot
+    }
+
+    func isCurrent(_ snapshot: Snapshot) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard revisions[snapshot.binding.macID] == snapshot.revision,
+              let current = binding(macID: snapshot.binding.macID) else { return false }
+        return current.boundAt == snapshot.binding.boundAt
+            && LANIdentityProof.usableSecret(current.secret) == LANIdentityProof.usableSecret(snapshot.binding.secret)
+    }
+
+    /// Il recupero dell'IP aggiorna solo metadati: non può ricreare un pairing o riscrivere una credenziale.
+    func refreshEndpoint(_ endpoint: String, ifCurrent snapshot: Snapshot) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard isCurrent(snapshot) else { return false }
+        var list = all()
+        guard let index = list.firstIndex(where: { $0.macID == snapshot.binding.macID }) else { return false }
+        list[index].endpoint = endpoint
+        persist(list)
+        return true
+    }
+
     func save(_ binding: MacBinding) {
+        lock.lock(); defer { lock.unlock() }
+        revisions[binding.macID] = UUID()
         let secret = binding.secret.trimmingCharacters(in: .whitespacesAndNewlines)
         if secret.isEmpty || secret == "(pending-handshake)" {
             RemoteBindingCredentialStore.deleteBindingSecret(macID: binding.macID)
@@ -72,6 +117,8 @@ final class BindingStore {
     }
 
     func remove(macID: String) {
+        lock.lock(); defer { lock.unlock() }
+        revisions[macID] = UUID()
         let remaining = all().filter { $0.macID != macID }
         RemoteBindingCredentialStore.deleteBindingSecret(macID: macID)
         persist(remaining)
@@ -182,16 +229,34 @@ final class LANConnectionManager {
     /// 按绑定自动重连:当前发现结果里按 macID 找回那台 Mac → resolve → 出 RemoteInferenceService base URL。
     /// 发现结果里没有 (Mac 离线/不在同网) → nil (未来这里接 relay)。
     func resolveEndpoint(for binding: MacBinding) async -> URL? {
-        // 1) 绑定里存了直连地址 (配对时 resolve 到的) → 直接用, 不需要发现层在跑 (聊天页 discovery 已停)。
-        if let ep = binding.endpoint, let url = URL(string: ep) {
-            return url.appendingPathComponent("v1")
+        guard let snapshot = bindings.snapshot(matching: binding) else { return nil }
+        return await resolveEndpoint(for: snapshot)
+    }
+
+    private func resolveEndpoint(for snapshot: BindingStore.Snapshot) async -> URL? {
+        let binding = snapshot.binding
+        guard LANIdentityProof.usableSecret(binding.secret) != nil else { return nil }
+        // Bonjour prima della cache: l'IP assegnato al Mac può cambiare tra due turni.
+        var discoveredRoots: [URL] = []
+        if let mac = await discovery.findMac(macID: binding.macID),
+           let root = await resolveRoot(mac.endpoint) {
+            discoveredRoots.append(root)
         }
-        // 2) 旧绑定没存 → 靠发现层重新 resolve, 并把结果回写绑定 (自愈, 下次直连)。
-        guard let mac = discovery.discovered.first(where: { $0.macID == binding.macID || $0.id == binding.macID }),
-              let root = await resolveRoot(mac.endpoint) else { return nil }
-        var healed = binding
-        healed.endpoint = root.absoluteString
-        bindings.save(healed)
+        guard !Task.isCancelled, bindings.isCurrent(snapshot) else { return nil }
+        guard let root = await LANEndpointPolicy.verifiedRoot(
+            discovered: discoveredRoots, savedEndpoint: binding.endpoint,
+            macID: binding.macID, secret: binding.secret,
+            isCurrent: { self.bindings.isCurrent(snapshot) },
+            probe: { root, challenge in
+                guard let request = LANEndpointPolicy.identityRequest(root: root, challenge: challenge) else { return nil }
+                // Nessun Authorization: la risposta deve provare la conoscenza del token.
+                guard let (data, response) = try? await LANHTTPTransport.session.data(for: request),
+                      (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+                return try? JSONDecoder().decode(LANIdentityProof.Response.self, from: data)
+            }
+        ) else { return nil }
+        guard !Task.isCancelled,
+              bindings.refreshEndpoint(root.absoluteString, ifCurrent: snapshot) else { return nil }
         return root.appendingPathComponent("v1")
     }
 
@@ -201,22 +266,24 @@ final class LANConnectionManager {
     func resolveRemoteModel(_ modelID: String) async -> (url: URL, token: String?, modelName: String)? {
         let parts = modelID.components(separatedBy: "::")
         guard parts.count == 3, parts[0] == "remote" else { return nil }
-        guard let binding = bindings.binding(macID: parts[1]),
-              let base = await resolveEndpoint(for: binding) else { return nil }
-        let token = binding.secret.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty else { return nil }
+        guard let snapshot = bindings.snapshot(macID: parts[1]),
+              let base = await resolveEndpoint(for: snapshot),
+              !Task.isCancelled, bindings.isCurrent(snapshot),
+              let token = LANIdentityProof.usableSecret(snapshot.binding.secret) else { return nil }
         return (base, token, parts[2])
     }
 
     /// 拉一台已绑定 Mac 的 /v1/models, 转成远程 ModelDescriptor (给 catalog 列进选择器)。
     func remoteModels(for binding: MacBinding) async -> [ModelDescriptor] {
-        guard let base = await resolveEndpoint(for: binding) else { return [] }
-        let token = binding.secret.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty else { return [] }
+        guard let snapshot = bindings.snapshot(matching: binding),
+              let base = await resolveEndpoint(for: snapshot),
+              !Task.isCancelled, bindings.isCurrent(snapshot),
+              let token = LANIdentityProof.usableSecret(snapshot.binding.secret) else { return [] }
         var req = URLRequest(url: base.appendingPathComponent("models"))
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.timeoutInterval = 8
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+        guard let (data, resp) = try? await LANHTTPTransport.session.data(for: req),
+              !Task.isCancelled, bindings.isCurrent(snapshot),
               (resp as? HTTPURLResponse)?.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let arr = json["data"] as? [[String: Any]] else { return [] }
@@ -313,33 +380,36 @@ final class LANConnectionManager {
 
     @discardableResult
     func pair(_ mac: DiscoveredMac, deviceName: String = LANConnectionManager.defaultDeviceName) async -> MacBinding? {
-        let key = mac.macID ?? mac.id   // 优先 TXT 稳定 id;没读到就用 Bonjour 服务名 (始终有)
         guard let root = await resolveRoot(mac.endpoint) else {
             lastPairError = "解析 Mac 地址失败(resolve 不到 host)"
             return nil
         }
-        guard let token = await requestPairToken(root, deviceName: deviceName) else {
+        guard let pair = await requestPairToken(root, deviceName: deviceName),
+              mac.macID == nil || mac.macID == pair.macID else {
             lastPairError = "握手失败:\(root.absoluteString)/pair 没返回 token(Mac 没弹窗/未允许/连不上)"
             return nil
         }
         lastPairError = nil
-        let binding = MacBinding(macID: key, name: mac.name, secret: token, boundAt: Date(), endpoint: root.absoluteString)
+        let binding = MacBinding(macID: pair.macID, name: mac.name, secret: pair.token, boundAt: Date(), endpoint: root.absoluteString)
         bindings.save(binding)
         return binding
     }
 
-    private func requestPairToken(_ root: URL, deviceName: String) async -> String? {
+    private func requestPairToken(_ root: URL, deviceName: String) async -> (token: String, macID: String)? {
         var req = URLRequest(url: root.appendingPathComponent("pair"))
         req.httpMethod = "POST"
         req.timeoutInterval = 60   // 给 Mac 端点「允许」留足时间
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": deviceName])
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await LANHTTPTransport.session.data(for: req)
             guard (resp as? HTTPURLResponse)?.statusCode == 200,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let token = json["token"] as? String else { return nil }
-            return token
+                  let token = json["token"] as? String,
+                  LANIdentityProof.usableSecret(token) != nil,
+                  let macID = json["macID"] as? String, !macID.isEmpty,
+                  !macID.contains("\0") else { return nil }
+            return (token, macID)
         } catch { return nil }
     }
 }

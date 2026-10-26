@@ -57,6 +57,16 @@ public final class ModelRuntimeCoordinator {
     /// 用于 generating → ready 和 cancel → ready 回退时恢复 backend 信息。
     private var lastKnownBackend: String = "cpu"
 
+    /// Il backend effettivo resta disponibile anche durante lo streaming;
+    /// la preferenza delle impostazioni può differire dopo un fallback all'avvio.
+    public var activeBackend: String? {
+        switch sessionState {
+        case .ready(_, let backend): return backend
+        case .generating: return lastKnownBackend
+        default: return nil
+        }
+    }
+
     private let log = Logger(subsystem: "PhoneClaw", category: "Coordinator")
 
     // MARK: - Init

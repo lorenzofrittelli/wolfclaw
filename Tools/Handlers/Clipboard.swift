@@ -117,7 +117,10 @@ enum ClipboardTools {
                 guard let text = args["text"] as? String else {
                     return failurePayload(error: tr("缺少 text 参数", "Missing text parameter", "text パラメータがありません"))
                 }
-                await MainActor.run { UIPasteboard.general.string = text }
+                try await MainActor.run {
+                    try Task.checkCancellation()
+                    UIPasteboard.general.string = text
+                }
                 return canonicalWriteResult(text: text).detail
             },
             executeCanonical: { args in
@@ -127,7 +130,10 @@ enum ClipboardTools {
                         toolResult: failurePayload(error: tr("缺少 text 参数", "Missing text parameter", "text パラメータがありません"))
                     )
                 }
-                await MainActor.run { UIPasteboard.general.string = text }
+                try await MainActor.run {
+                    try Task.checkCancellation()
+                    UIPasteboard.general.string = text
+                }
                 return canonicalWriteResult(text: text)
             }
         )

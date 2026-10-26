@@ -45,8 +45,8 @@ examples:
     scenario: "直前の文脈を参照"
 
 # Sync anchor (see scripts/check-skill-sync.sh):
-translation-source-commit: 034c373
-translation-source-sha256: 89b5dfd5a5e9b071f81bb0fc73d5217134643dcd0d2aa4254c8aa7ea55e372f7
+translation-source-commit: 31bf61d3219f597f62b7672f94475148bca5de19
+translation-source-sha256: c17a699084805c82462f02c7a274d6cc5deb70983864b0efa87acbaeeaa780eb
 ---
 
 # プロ翻訳
@@ -70,6 +70,7 @@ translation-source-sha256: 89b5dfd5a5e9b071f81bb0fc73d5217134643dcd0d2aa4254c8aa
 **信・達・雅**: 原意に忠実で、目標言語の文法・慣用に合い、原文の文体(フォーマル/口語/文学的/技術的)に合わせる。
 
 具体的には:
+- 引用符内、コロンの後、コードブロック内など、ユーザーが提示した原文を全文翻訳する。冒頭・末尾・挨拶・間投詞・並列する節を省略せず、最後の節だけを翻訳しない。
 - 慣用句は直訳ではなく同等表現を使う("画蛇添足" → "gild the lily")
 - 中国語から英語では省略された主語を補い、英語から中国語では中国語の慣習に従って省略する
 - 日本語/韓国語 → 中国語/英語では SOV から SVO へ語順を調整する

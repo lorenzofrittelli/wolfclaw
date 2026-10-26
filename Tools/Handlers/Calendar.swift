@@ -228,6 +228,8 @@ enum CalendarTools {
             event.notes = notes
         }
 
+        // Il consenso di sistema può arrivare dopo Stop o il cambio sessione.
+        try Task.checkCancellation()
         try SystemStores.event.save(event, span: .thisEvent, commit: true)
 
         let detail = successPayload(
@@ -691,17 +693,11 @@ enum CalendarTools {
 
     private static func boundedInt(_ value: Any?, defaultValue: Int, min: Int, max: Int) -> Int {
         let raw: Int?
-        switch value {
-        case let int as Int:
-            raw = int
-        case let double as Double:
-            raw = Int(double)
-        case let number as NSNumber:
-            raw = number.intValue
-        case let string as String:
+        if let string = value as? String {
             raw = Int(string.trimmingCharacters(in: .whitespacesAndNewlines))
-        default:
-            raw = nil
+        } else {
+            // Difesa anche per i chiamanti che non attraversano il registry.
+            raw = ToolArgumentValidator.exactInteger(value)
         }
         let resolved = raw ?? defaultValue
         return Swift.max(min, Swift.min(max, resolved))

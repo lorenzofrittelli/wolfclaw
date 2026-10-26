@@ -20,6 +20,32 @@ import Foundation
 
 enum L10n {
 
+    // Le nuove stringhe usano il catalogo, includendo l'italiano senza cambiare
+    // la lingua delle schermate esistenti o ignorare una scelta manuale.
+    private static func localized(_ key: String) -> String {
+        let context = LanguageService.shared.current
+        let bundle: Bundle
+        if context.raw != .auto,
+           let path = Bundle.main.path(forResource: context.localeIdentifier, ofType: "lproj"),
+           let selectedBundle = Bundle(path: path) {
+            bundle = selectedBundle
+        } else {
+            bundle = .main
+        }
+        return NSLocalizedString(key, tableName: "Localizable", bundle: bundle, comment: "")
+    }
+
+    enum Action {
+        static var title: String { localized("Confirm action") }
+        static var confirm: String { localized("Confirm") }
+        static var cancel: String { localized("Cancel") }
+        static var deleteContact: String { localized("Delete contact") }
+        static var saveContact: String { localized("Save contact") }
+        static var createEvent: String { localized("Create calendar event") }
+        static var createReminder: String { localized("Create reminder") }
+        static var replaceClipboard: String { localized("Replace clipboard contents") }
+    }
+
     // MARK: - 配置页 (Configurations)
 
     enum Config {
@@ -70,6 +96,17 @@ enum L10n {
     // MARK: - 错误 / 状态消息 (待 Phase 2/4 填充)
 
     enum Error {
-        // 占位
+        static var divisionByZero: String {
+            localized("Cannot divide by zero.")
+        }
+        static var arithmeticLimit: String {
+            localized("This calculation exceeds the local calculator's precision or numeric limits.")
+        }
+        static var invalidToolRequest: String {
+            localized("The model generated an invalid tool request. No action was performed. Please rephrase and try again.")
+        }
+        static var noResponse: String {
+            localized("The model did not return a usable response. Please try again.")
+        }
     }
 }

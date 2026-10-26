@@ -246,6 +246,8 @@ enum RemindersTools {
             reminder.notes = notes
         }
 
+        // Il consenso di sistema può arrivare dopo Stop o il cambio sessione.
+        try Task.checkCancellation()
         try SystemStores.event.save(reminder, commit: true)
 
         let summary = tr(

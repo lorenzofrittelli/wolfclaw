@@ -74,6 +74,7 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @State private var engine = AgentEngine()
+    @State private var presentedToolConfirmation: ToolConfirmationRequest?
     @State private var audioCapture = AudioCaptureService()
     @State private var inputText = ""
     @State private var pendingContextFollowUpAct: DialogueAct?
@@ -276,6 +277,7 @@ struct ContentView: View {
         }
         .task {
             guard !ProcessInfo.processInfo.isRunningXCTest else { return }
+            engine.toolConfirmationUIEnabled = scenePhase == .active
             engine.setup()
             refreshDisplayItems()
             if !consumePendingLiveLandLaunchIfNeeded(), !consumePendingLiveLaunchIfNeeded() {
@@ -288,6 +290,7 @@ struct ContentView: View {
             await loadSelectedPhoto()
         }
         .onChange(of: scenePhase) { _, newPhase in
+            engine.toolConfirmationUIEnabled = newPhase == .active
             if newPhase == .active {
                 audioCapture.refreshPermissionStatus()
                 if showLiveLand {
@@ -351,6 +354,8 @@ struct ContentView: View {
             handleRuntimeStateChange(newState)
         }
         .onDisappear {
+            engine.toolConfirmationUIEnabled = false
+            presentedToolConfirmation = nil
             topNoticeDismissTask?.cancel()
             topNoticeDismissTask = nil
         }
@@ -374,6 +379,35 @@ struct ContentView: View {
             ModelSwitcherSheet(engine: engine)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
+        }
+        .onAppear {
+            engine.toolConfirmationUIEnabled = scenePhase == .active
+        }
+        .onChange(of: engine.pendingToolConfirmation) { _, request in
+            // Lo stato di presentazione è separato dalla concessione: solo il
+            // pulsante esplicito può autorizzare la richiesta con questo UUID.
+            presentedToolConfirmation = request
+        }
+        .onChange(of: presentedToolConfirmation) { old, current in
+            if current == nil, let old {
+                engine.cancelPendingToolConfirmation(id: old.id)
+            }
+        }
+        .alert(item: $presentedToolConfirmation) { request in
+            let confirm: Alert.Button = request.isDestructive
+                ? .destructive(Text(L10n.Action.confirm)) {
+                    engine.resolveToolConfirmation(id: request.id, approved: true)
+                }
+                : .default(Text(L10n.Action.confirm)) {
+                    engine.resolveToolConfirmation(id: request.id, approved: true)
+                }
+            return Alert(
+                title: Text(request.title), message: Text(request.message),
+                primaryButton: confirm,
+                secondaryButton: .cancel(Text(L10n.Action.cancel)) {
+                    engine.resolveToolConfirmation(id: request.id, approved: false)
+                }
+            )
         }
     }
 

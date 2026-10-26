@@ -253,6 +253,24 @@ final class MacGateway {
     }
 
     private func proxy(_ req: GatewayHTTPRequest, to conn: NWConnection) async {
+        // Il client verifica l'identità prima di trasmettere Bearer o contenuti.
+        // L'hash identifica la credenziale; la prova HMAC lega macID e nonce fresco.
+        if req.method == "POST", req.path == "/identity" {
+            guard isAllowedPairOrigin(req),
+                  let challenge = try? JSONDecoder().decode(LANIdentityProof.Challenge.self, from: req.body),
+                  LANIdentityProof.validChallenge(challenge),
+                  let device = pairedDevicesSnapshot().first(where: {
+                      LANIdentityProof.credentialID(secret: $0.token) == challenge.credentialID
+                  }),
+                  let proof = LANIdentityProof.response(to: challenge, macID: macID, secret: device.token),
+                  let data = try? JSONEncoder().encode(proof),
+                  let body = String(data: data, encoding: .utf8) else {
+                sendStatus(conn, 401, "Identity verification unavailable")
+                return
+            }
+            sendJSON(conn, 200, body)
+            return
+        }
         // 配对端点: 经审批 (onPairRequest; nil 则自动允许) → 记录设备 + 签发 token。
         if req.method == "POST", req.path == "/pair" {
             guard isAllowedPairOrigin(req) else {
@@ -268,7 +286,9 @@ final class MacGateway {
                 return
             }
             onPairedChanged?()
-            sendJSON(conn, 200, "{\"token\":\"\(token)\"}")
+            let body = (try? JSONSerialization.data(withJSONObject: ["token": token, "macID": macID]))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            sendJSON(conn, 200, body)
             return
         }
         // /v1/* 要 Bearer 鉴权

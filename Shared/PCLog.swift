@@ -28,7 +28,11 @@ enum PCLog {
     // 调用方一般直接走顶层 `func log(...)` (AgentEngine.swift),内部转发到这里。
 
     static func debug(_ message: String) {
-        debugLogger.debug("\(message, privacy: .public)")
+        // I log liberi possono contenere dati personali: non vengono compilati
+        // nelle release e in debug il sistema li tratta come contenuto privato.
+        #if DEBUG
+        debugLogger.debug("\(message, privacy: .private)")
+        #endif
     }
 
     // MARK: - [Model] Load / Unload

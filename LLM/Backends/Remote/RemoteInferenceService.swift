@@ -67,6 +67,8 @@ final class RemoteInferenceService: InferenceService {
     // MARK: - Internals
 
     @ObservationIgnored private var streamTask: Task<Void, Never>?
+    @ObservationIgnored private var boundModelID: String?
+    @ObservationIgnored private var endpointConfigurationID = UUID()
     @ObservationIgnored private let session: URLSession
     private static let defaultRemoteContextBudgetTokens = 8192
 
@@ -88,7 +90,7 @@ final class RemoteInferenceService: InferenceService {
         cfg.timeoutIntervalForRequest = 180
         cfg.timeoutIntervalForResource = 600
         cfg.waitsForConnectivity = false
-        self.session = URLSession(configuration: cfg)
+        self.session = LANHTTPTransport.makeSession(configuration: cfg)
         self.stats.backend = "remote"
     }
 
@@ -106,41 +108,64 @@ final class RemoteInferenceService: InferenceService {
 
     /// 远程模型没有「加载」概念 —— 刷新配置 + 确认网关可达即视为已加载。
     func load(modelID: String) async throws {
+        let configurationID = UUID()
+        endpointConfigurationID = configurationID
         isLoading = true
-        defer { isLoading = false }
+        isLoaded = false
+        defer { if endpointConfigurationID == configurationID { isLoading = false } }
 
-        // P0：用户可能刚在设置里改了地址 / 模型名，每次 load 重新取。
-        // 优先用注入的 resolver (从绑定解析 endpoint/token/model);否则回退 UserDefaults (P0)。
-        if let resolver = endpointResolver, let r = await resolver(modelID) {
-            baseURL = r.url
-            authToken = r.token
-            remoteModelName = r.modelName
-        } else {
+        let wasBound = boundModelID != nil
+        boundModelID = modelID.hasPrefix("remote::") ? modelID : nil
+        if boundModelID == nil {
+            // Gli endpoint manuali restano supportati, senza riutilizzare il token di un binding.
+            if wasBound {
+                authToken = nil
+                baseURL = nil
+                remoteModelName = RemoteInferenceService.storedModelName()
+            }
             baseURL = RemoteInferenceService.storedEndpoint() ?? baseURL
             if remoteModelName.isEmpty {
                 remoteModelName = RemoteInferenceService.storedModelName()
             }
         }
-        guard let baseURL else {
-            throw RemoteInferenceError.notConfigured
-        }
         statusMessage = tr("正在连接 Mac · \(remoteModelName)", "Connecting to Mac · \(remoteModelName)", "Mac に接続中 · \(remoteModelName)")
-        try await pingReachable(baseURL)
-        try await prepareRemoteModelIfSupported(baseURL)
+        try await pingReachable()
+        try Task.checkCancellation()
+        guard endpointConfigurationID == configurationID else { throw CancellationError() }
+        try await prepareRemoteModelIfSupported()
+        try Task.checkCancellation()
+        guard endpointConfigurationID == configurationID else { throw CancellationError() }
         isLoaded = true
         statusMessage = tr("已连接 Mac · \(remoteModelName)", "Connected to Mac · \(remoteModelName)", "Mac に接続済み · \(remoteModelName)")
-        PCLog.debug("[Remote] loaded \(baseURL.absoluteString) model=\(remoteModelName)")
+        PCLog.debug("[Remote] loaded model=\(remoteModelName)")
     }
 
     func unload() {
         Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.streamTask?.cancel()
-            self.streamTask = nil
-            self.isGenerating = false
-            self.isLoaded = false
-            self.statusMessage = ""
+            self?.clearRemoteConnectionState()
         }
+    }
+
+    func unloadAsync() async {
+        // Il cambio modello attende lo scaricamento: un Task differito non deve cancellare il nuovo binding.
+        await MainActor.run { clearRemoteConnectionState() }
+    }
+
+    @MainActor
+    private func clearRemoteConnectionState() {
+        endpointConfigurationID = UUID()
+        if boundModelID != nil {
+            baseURL = nil
+            authToken = nil
+            remoteModelName = ""
+        }
+        boundModelID = nil
+        streamTask?.cancel()
+        streamTask = nil
+        isGenerating = false
+        isLoading = false
+        isLoaded = false
+        statusMessage = ""
     }
 
     func cancel() {
@@ -207,17 +232,13 @@ final class RemoteInferenceService: InferenceService {
         AsyncThrowingStream { continuation in
             let task = Task { @MainActor [weak self] in
                 guard let self else { continuation.finish(); return }
-                guard let baseURL = self.baseURL else {
-                    continuation.finish(throwing: RemoteInferenceError.notConfigured)
-                    return
-                }
-
                 self.isGenerating = true
                 let startTime = CFAbsoluteTimeGetCurrent()
                 var ttftMs: Double?
                 var chunkCount = 0
 
                 do {
+                    let baseURL = try await self.verifiedBaseForRequest()
                     var req = URLRequest(url: baseURL.appendingPathComponent("chat/completions"))
                     req.httpMethod = "POST"
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -280,16 +301,50 @@ final class RemoteInferenceService: InferenceService {
 
     // MARK: - Reachability
 
-    private func pingReachable(_ base: URL) async throws {
+    /// Risolve nuovamente il Mac prima di ogni richiesta autenticata, anche tra turni.
+    /// Un binding non verificato non ricade su un indirizzo manuale o sul vecchio token.
+    private func verifiedBaseForRequest() async throws -> URL {
+        try Task.checkCancellation()
+        let configurationID = endpointConfigurationID
+        if let modelID = boundModelID {
+            let resolved = await endpointResolver?(modelID)
+            // Un vecchio resolver non può ripopolare credenziali dopo unload/cambio modello.
+            try Task.checkCancellation()
+            guard endpointConfigurationID == configurationID, boundModelID == modelID else {
+                throw CancellationError()
+            }
+            guard let resolved,
+                  let token = resolved.token.flatMap(LANIdentityProof.usableSecret) else {
+                baseURL = nil
+                authToken = nil
+                isLoaded = false
+                throw RemoteInferenceError.identityVerificationFailed
+            }
+            baseURL = resolved.url
+            authToken = token
+            remoteModelName = resolved.modelName
+        }
+        guard let baseURL else { throw RemoteInferenceError.notConfigured }
+        return baseURL
+    }
+
+    private func pingReachable() async throws {
+        let base = try await verifiedBaseForRequest()
         var req = URLRequest(url: base.appendingPathComponent("models"))
         req.httpMethod = "GET"
         req.timeoutInterval = 6
         if let authToken { req.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization") }
         do {
             let (_, response) = try await session.data(for: req)
-            // 2xx 理想；4xx 也算「连得上」(可能 /models 需要 auth)，真正生成时再暴露。
-            guard let http = response as? HTTPURLResponse, http.statusCode < 500 else {
+            // I binding richiedono successo; solo gli endpoint manuali mantengono
+            // compatibilità con servizi senza /models. I redirect non sono validi.
+            guard let http = response as? HTTPURLResponse else {
                 throw RemoteInferenceError.unreachable
+            }
+            let requiresSuccess = boundModelID != nil
+                || (300..<400).contains(http.statusCode) || http.statusCode >= 500
+            if !(200..<300).contains(http.statusCode), requiresSuccess {
+                throw RemoteInferenceError.httpStatus(http.statusCode)
             }
         } catch let e as RemoteInferenceError {
             throw e
@@ -298,7 +353,8 @@ final class RemoteInferenceService: InferenceService {
         }
     }
 
-    private func prepareRemoteModelIfSupported(_ base: URL) async throws {
+    private func prepareRemoteModelIfSupported() async throws {
+        let base = try await verifiedBaseForRequest()
         let cleanModel = remoteModelName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanModel.isEmpty else { return }
 
@@ -375,6 +431,7 @@ final class RemoteInferenceService: InferenceService {
 enum RemoteInferenceError: LocalizedError {
     case notConfigured
     case unreachable
+    case identityVerificationFailed
     case httpStatus(Int)
 
     var errorDescription: String? {
@@ -387,6 +444,10 @@ enum RemoteInferenceError: LocalizedError {
             return tr("连不上 Mac 推理服务，确认在同一局域网且服务已开启。",
                       "Can't reach the Mac inference service — check you're on the same LAN and it's running.",
                       "Mac 推論サービスに接続できません。同じLANにいて、サービスが起動しているか確認してください。")
+        case .identityVerificationFailed:
+            return tr("无法验证已配对 Mac 的身份，请更新 Mac 网关并确认连接。",
+                      "Can't verify the paired Mac. Update the Mac gateway and check the connection.",
+                      "ペアリング済みMacを確認できません。Macゲートウェイを更新し、接続を確認してください。")
         case .httpStatus(let code):
             return tr("Mac 推理返回错误 (HTTP \(code))。",
                       "Mac inference returned an error (HTTP \(code)).",
@@ -461,7 +522,7 @@ struct ChatCompletionsLanguageModelExecutor: LanguageModelExecutor {
         ]
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
+        let (bytes, response) = try await LANHTTPTransport.session.bytes(for: urlRequest)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             throw ChatCompletionsLanguageModelError.httpStatus(code)

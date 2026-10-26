@@ -73,6 +73,7 @@ struct RecentContextArtifact {
     let visibleAnswer: String?
     let summary: String
     let detail: String
+    let conversationContext: String
     let supportsRefresh: Bool
     let createdAt: Date
 
@@ -86,6 +87,7 @@ struct RecentContextArtifact {
         summary: String,
         detail: String,
         supportsRefresh: Bool,
+        conversationContext: String = "",
         sourceMessageID: UUID? = nil,
         createdAt: Date = Date()
     ) {
@@ -98,6 +100,7 @@ struct RecentContextArtifact {
         self.visibleAnswer = visibleAnswer
         self.summary = summary
         self.detail = detail
+        self.conversationContext = conversationContext
         self.supportsRefresh = supportsRefresh
         self.createdAt = createdAt
     }
@@ -114,10 +117,11 @@ struct RecentContextArtifact {
 
     var classifierSummary: String {
         let normalizedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !normalizedSummary.isEmpty {
-            return normalizedSummary
-        }
-        return promptSummary
+        return PriorContextPolicy.summary(
+            context: conversationContext,
+            result: normalizedSummary.isEmpty ? promptSummary : normalizedSummary,
+            maxCharacters: 1_200
+        )
     }
 
     var promptSummary: String {
@@ -319,6 +323,31 @@ extension AgentEngine {
         return (nil, rawName, rawName, false)
     }
 
+    func priorConversationContext(for sourceMessageID: UUID) -> String {
+        let currentUserID = messages.last(where: { $0.role == .user })?.id
+        let contextMessages = messages.map { message -> PriorContextPolicy.Message in
+            let role: PriorContextPolicy.Message.Role
+            let content: String
+            switch message.role {
+            case .user:
+                role = .user
+                content = message.content
+            case .assistant:
+                role = .assistant
+                content = sanitizedContextAssistantContent(message.content)
+            case .system, .skillResult:
+                role = .other
+                content = ""
+            }
+            return PriorContextPolicy.Message(id: message.id, role: role, content: content)
+        }
+        return PriorContextPolicy.context(
+            from: contextMessages,
+            through: sourceMessageID,
+            excluding: currentUserID
+        )
+    }
+
     func latestPriorContextArtifact() -> RecentContextArtifact? {
         var skippedCurrentUser = false
         var visibleAnswer: (
@@ -438,6 +467,7 @@ extension AgentEngine {
                 summary: artifact.summary,
                 detail: artifact.detail,
                 supportsRefresh: artifact.supportsRefresh,
+                conversationContext: priorConversationContext(for: artifact.sourceMessageID),
                 sourceMessageID: artifact.sourceMessageID,
                 createdAt: artifact.createdAt
             )
@@ -454,6 +484,7 @@ extension AgentEngine {
                 summary: artifact.summary,
                 detail: artifact.detail,
                 supportsRefresh: artifact.supportsRefresh,
+                conversationContext: priorConversationContext(for: artifact.sourceMessageID),
                 sourceMessageID: artifact.sourceMessageID,
                 createdAt: artifact.createdAt
             )
@@ -470,6 +501,7 @@ extension AgentEngine {
                 summary: visibleAnswer.content,
                 detail: visibleAnswer.content,
                 supportsRefresh: visibleAnswer.supportsRefresh,
+                conversationContext: priorConversationContext(for: visibleAnswer.id),
                 createdAt: visibleAnswer.timestamp
             )
         }
@@ -523,6 +555,7 @@ extension AgentEngine {
                 summary: summary,
                 detail: normalizedDetail,
                 supportsRefresh: true,
+                conversationContext: priorConversationContext(for: message.id),
                 createdAt: message.timestamp
             )
         }
@@ -716,6 +749,7 @@ extension AgentEngine {
             previousVisibleAnswer: artifact.visibleAnswer,
             previousResultSummary: artifact.promptSummary,
             previousResultDetail: artifact.detail,
+            previousConversationContext: artifact.conversationContext,
             enableThinking: effectiveEnableThinking
         )
         let plan = makePromptPlan(

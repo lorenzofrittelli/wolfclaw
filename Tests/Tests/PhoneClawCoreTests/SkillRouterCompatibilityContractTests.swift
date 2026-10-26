@@ -39,15 +39,17 @@ final class SkillRouterCompatibilityContractTests: XCTestCase {
     }
 
     private func liveModeCoverSource(in contentView: String) -> String {
+        // Il confine è il modificatore successivo, non la sua firma completa:
+        // aggiungere onDismiss non deve includere tutto il resto del file.
         guard let afterLiveModeCover = contentView
-            .components(separatedBy: ".fullScreenCover(isPresented: $showLiveMode)")
+            .components(separatedBy: ".fullScreenCover(isPresented: $showLiveMode")
             .dropFirst()
             .first
         else {
             return ""
         }
         return afterLiveModeCover
-            .components(separatedBy: ".fullScreenCover(isPresented: $showConfigurations)")
+            .components(separatedBy: ".fullScreenCover(")
             .first ?? afterLiveModeCover
     }
 
@@ -442,7 +444,10 @@ final class SkillRouterCompatibilityContractTests: XCTestCase {
         XCTAssertTrue(remote.contains(".chatCompletionMessages()"))
         XCTAssertTrue(remote.contains("struct ChatCompletionsLanguageModel: LanguageModel"))
         XCTAssertTrue(remote.contains("struct ChatCompletionsLanguageModelExecutor: LanguageModelExecutor"))
-        XCTAssertTrue(remote.contains("LanguageModelCapabilities(capabilities: [])"))
+        XCTAssertNotNil(remote.range(
+            of: #"LanguageModelCapabilities\s*\(\s*(?:capabilities:\s*)?\[\s*\]\s*\)"#,
+            options: .regularExpression
+        ))
         XCTAssertTrue(remote.contains("streamingInto channel: LanguageModelExecutorGenerationChannel"))
         XCTAssertTrue(remote.contains("chatCompletionMessages(from: request.transcript)"))
         XCTAssertTrue(remote.contains("\"stream_options\": [\"include_usage\": true]"))
@@ -881,7 +886,7 @@ final class SkillRouterCompatibilityContractTests: XCTestCase {
         XCTAssertFalse(contentView.contains("guard !engine.isLiveLandTurnActive else { return }"))
         XCTAssertFalse(contentView.contains(".fullScreenCover(isPresented: $showLiveLand)"))
         XCTAssertFalse(contentView.contains("LiveLandSessionView("))
-        XCTAssertTrue(contentView.contains("private func enterLiveLand()"))
+        XCTAssertNotNil(contentView.range(of: #"private\s+func\s+enterLiveLand\s*\("#, options: .regularExpression))
         XCTAssertTrue(contentView.contains("showLiveLand = true"))
         XCTAssertFalse(contentView.contains("LiveWarmPool.shared.cancelPrewarm()"))
         XCTAssertTrue(contentView.contains("await liveLandRuntime.start(agentEngine: engine)"))

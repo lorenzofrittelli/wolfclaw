@@ -44,8 +44,8 @@ examples:
     scenario: "Delete a contact"
 
 # Sync anchor (see scripts/check-skill-sync.sh):
-translation-source-commit: afa08ec1
-translation-source-sha256: 75e6621c9d9ff05a822b7395716be9b1bbc008d5cc7b348ca90c6eaec092e056
+translation-source-commit: 698be7382a57aa90650be0e5bdedb367aa6b371d
+translation-source-sha256: b4ed791959fedf90918be4f0b74462d87248467a620ab913ca1bd892e210a460
 ---
 
 # Contact Lookup and Management
@@ -62,9 +62,10 @@ You help the user search, create, update, or delete address book contacts.
   - `identifier`: Contact identifier
 - **contacts-upsert**: Create or update a contact
   - `name`: Required, contact name
-  - `phone`: Optional, phone number; if provided, it's used first for deduplication
+  - `identifier`: Optional, stable identifier of an existing contact; prefer it for updates
+  - `phone`: Optional, complete phone number to add; deduplicate by the full number and preserve other numbers
   - `company`: Optional, company
-  - `email`: Optional, email
+  - `email`: Optional, email address to add; preserve other addresses and labels
   - `notes`: Optional, notes
 - **contacts-delete**: Delete a contact
   - `query`: Keyword, usable for fuzzy search
@@ -90,7 +91,7 @@ You help the user search, create, update, or delete address book contacts.
 5. Look up a phone, email, or contact info: call `contacts-search`
 6. Save, add, or update a contact: call `contacts-upsert`
 7. For lookups, prefer extracting `name`; fall back to `query` if you cannot
-8. For save or update, extract name, phone, company, email, and notes
+8. For save or update, extract name, phone, company, email, and notes. For an update, search first and use the existing contact identifier. Preserve the existing name, surname, and omitted fields; name is not a rename instruction. If phone or email matches multiple contacts, disambiguate before updating instead of choosing one.
 9. If the `name` required to save a contact is missing, ask briefly first
 10. After the tool succeeds, reply concisely in English with the result
 

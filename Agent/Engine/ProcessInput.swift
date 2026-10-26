@@ -80,6 +80,28 @@ extension AgentEngine {
             return
         }
 
+        // Le richieste aritmetiche isolate sono calcoli locali, privi di effetti esterni.
+        // Restano nella stessa transazione e cronologia delle risposte del modello.
+        if promptAttachments.isEmpty, audioInput == nil, forcedContextAct == nil,
+           let expression = ArithmeticEvaluator.recognizedExpression(in: normalizedText) {
+            guard isCurrentTurnOwner(turnContext), !Task.isCancelled else {
+                finishTurn(context: turnContext, userCancelled: true)
+                return
+            }
+            let answer: String
+            do {
+                answer = ArithmeticEvaluator.formattedResult(try ArithmeticEvaluator.evaluate(expression))
+            } catch ArithmeticEvaluator.EvaluationError.divisionByZero {
+                answer = L10n.Error.divisionByZero
+            } catch {
+                answer = L10n.Error.arithmeticLimit
+            }
+            lastTurnMatchedSkillIds = []
+            messages.append(ChatMessage(role: .assistant, content: answer))
+            finishTurn(context: turnContext)
+            return
+        }
+
         var requiresMultimodal = !promptAttachments.isEmpty || audioInput != nil
         var imageFollowUpBridgeSummary: String?
         var forceImageFollowUpTextPrompt = false
@@ -576,13 +598,32 @@ extension AgentEngine {
         }
 
         if shouldUsePlanner {
+            guard !Task.isCancelled, isCurrentTurnOwner(turnContext) else { return }
             log("[Agent] planner path triggered revision=\(plannerRevision)")
-            let plannerHandled = await executePlannedSkillChainIfPossible(
-                prompt: plannerInputPrompt,
-                userQuestion: normalizedText,
-                images: promptImages,
-                turnContext: turnContext
-            )
+            let plannerResult = await CancellableToolOperation.run(
+                register: { task in
+                    guard isCurrentTurnOwner(turnContext) else {
+                        task.cancel()
+                        return
+                    }
+                    activeTurnTask = task
+                }
+            ) { [self] in
+                await executePlannedSkillChainIfPossible(
+                    prompt: plannerInputPrompt,
+                    userQuestion: normalizedText,
+                    images: promptImages,
+                    turnContext: turnContext
+                )
+            }
+            // Non avviare il fallback e non modificare una nuova conversazione
+            // quando Stop o un cambio sessione hanno annullato il task planner.
+            guard let plannerHandled = plannerResult else {
+                finishTurn(context: turnContext, userCancelled: true)
+                return
+            }
+            guard sessionStore.currentSessionID == turnContext.sessionID,
+                  activeTurnContext == nil || activeTurnContext?.transactionID == turnContext.transactionID else { return }
 
             if plannerHandled {
                 if messages.indices.contains(msgIndex),
@@ -598,6 +639,14 @@ extension AgentEngine {
             // 下面 streaming 代码会填充).
             log("[Agent] planner not handled, falling back to single-skill agent path")
         }
+
+        // Stop può arrivare dopo il risultato del planner ma prima della ripresa
+        // del chiamante: non iniziare una nuova inferenza da un turno chiuso.
+        guard !Task.isCancelled,
+              isCurrentTurnOwner(turnContext),
+              let transaction = coordinator.currentTransaction,
+              !transaction.isTerminal,
+              transaction.state != .cancelling else { return }
 
         var detectedToolCall = false
         var buffer = ""
@@ -662,7 +711,8 @@ extension AgentEngine {
                 case .success(let fullText):
                     self.lastTurnRawModelOutputs.append(fullText)
 
-                    if self.parseToolCall(fullText) != nil {
+                    let runtimeCalls = self.parseRuntimeToolCalls(fullText)
+                    if !runtimeCalls.isEmpty {
                         self.setStreamingMessageContent(at: msgIndex, content: "")
                         self.recordCompletedObservation(plan: textPromptPlan)
                         // Tool chain continues the turn — txn stays .streaming,
@@ -681,7 +731,17 @@ extension AgentEngine {
                         return
                     }
 
+                    // Una chiamata scartata dal parser non è una risposta vuota:
+                    // mostriamo il fallimento senza eseguire o indovinare strumenti.
                     let cleaned = self.cleanOutput(fullText)
+                    if cleaned.isEmpty,
+                       ToolCallOutputPolicy.hasRejectedRequest(fullText, acceptedCallCount: runtimeCalls.count) {
+                        self.setStreamingMessageContent(at: msgIndex, content: L10n.Error.invalidToolRequest)
+                        self.recordCompletedObservation(plan: textPromptPlan)
+                        self.finishTurn(context: turnContext)
+                        return
+                    }
+
                     if shouldUseFullAgentPrompt,
                        matchedSkillIdsForTurn.count == 1,
                        !preloadedSkills.isEmpty,
@@ -735,7 +795,7 @@ extension AgentEngine {
                     }
                     self.setStreamingMessageContent(
                         at: msgIndex,
-                        content: cleaned.isEmpty ? PromptLocale.current.emptyReplyPlaceholder : cleaned
+                        content: cleaned.isEmpty ? L10n.Error.noResponse : cleaned
                     )
                     self.finishTurn(context: turnContext)
                 case .failure(let error):
@@ -796,7 +856,7 @@ extension AgentEngine {
                     switch result {
                     case .success(let text):
                         self.lastTurnRawModelOutputs.append(text)
-                        log("[Agent] LLM raw: \(text.prefix(300))")
+                        log("[Agent] LLM output chars=\(text.count)")
                         continuation.resume(returning: text)
                     case .failure(let error):
                         log("[Agent] LLM failed: \(error.localizedDescription)")
@@ -863,7 +923,7 @@ extension AgentEngine {
                 case .success(let text):
                     self.flushPendingStreamingMessageContentUpdates()
                     self.lastTurnRawModelOutputs.append(text)
-                    log("[Agent] LLM raw: \(text.prefix(300))")
+                    log("[Agent] LLM output chars=\(text.count)")
                     continuation.resume(returning: text)
                 case .failure(let error):
                     if self.isUserCancellationError(error) {

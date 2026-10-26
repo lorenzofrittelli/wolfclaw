@@ -278,6 +278,7 @@ extension AgentEngine {
         label: String,
         onToken: @escaping @MainActor @Sendable (String) -> Void = { _ in }
     ) async -> String? {
+        guard !Task.isCancelled else { return nil }
         let snapshot = InferenceSamplingSnapshot(
             topK: inference.samplingTopK,
             topP: inference.samplingTopP,
@@ -290,20 +291,27 @@ extension AgentEngine {
         inference.samplingTemperature = 0
         inference.maxOutputTokens = min(snapshot.maxOutputTokens, maxOutputTokens)
 
-        let raw = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
-            inference.generate(
-                prompt: prompt,
-                onToken: onToken,
-                onComplete: { result in
-                    switch result {
-                    case .success(let text):
-                        continuation.resume(returning: text)
-                    case .failure(let error):
-                        log("[\(label)] probe failed: \(error.localizedDescription)")
-                        continuation.resume(returning: nil)
+        // LiteRT legge i parametri all'apertura della sessione, anche per la prima sonda.
+        await inference.resetKVSession()
+        let raw: String?
+        if Task.isCancelled {
+            raw = nil
+        } else {
+            raw = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+                inference.generate(
+                    prompt: prompt,
+                    onToken: onToken,
+                    onComplete: { result in
+                        switch result {
+                        case .success(let text):
+                            continuation.resume(returning: text)
+                        case .failure(let error):
+                            log("[\(label)] probe failed: \(error.localizedDescription)")
+                            continuation.resume(returning: nil)
+                        }
                     }
-                }
-            )
+                )
+            }
         }
 
         inference.samplingTopK = snapshot.topK
@@ -312,7 +320,7 @@ extension AgentEngine {
         inference.maxOutputTokens = snapshot.maxOutputTokens
         await inference.resetKVSession()
 
-        return raw
+        return Task.isCancelled ? nil : raw
     }
 
     func kvPrefillTokensForCurrentTurn() -> Int {

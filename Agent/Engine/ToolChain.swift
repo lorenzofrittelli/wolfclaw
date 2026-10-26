@@ -32,10 +32,6 @@ private struct PhoneGroundPayloadNormalization {
     let remainingIssues: [String]
 }
 
-private struct SideEffectGateBlock {
-    let reply: String
-}
-
 protocol ToolResultCanonicalizer {
     func canonicalize(toolName: String, toolResult: String) -> CanonicalToolResult
 }
@@ -887,46 +883,33 @@ extension AgentEngine {
         return regrounded
     }
 
-    private func sideEffectGateBlock(
+    func toolSideEffectPreflightFailure(
         skillId: String,
-        displayName: String,
         toolName: String,
         arguments: [String: Any],
         userQuestion: String
-    ) -> SideEffectGateBlock? {
+    ) -> String? {
         guard let definition = skillRegistry.getDefinition(skillId) else {
             return nil
         }
 
         let policy = definition.metadata.sideEffects.effectivePolicy(forTool: toolName)
-        guard policy.isDeclared else {
-            return nil
-        }
-
-        if policy.level == .destructive {
+        if ToolConfirmationPolicy.isDestructive(toolName: toolName, declaredLevel: policy.level.rawValue) {
             if truthyArgument(arguments["all"]) || looksLikeBulkDestructiveIntent(userQuestion) {
-                return SideEffectGateBlock(reply: tr(
+                return tr(
                     "这是破坏性操作, 不能批量执行。请提供要删除的单个对象的编号、电话、邮箱或 identifier。",
                     "This is a destructive action and cannot be performed in bulk. Please provide the single item's number, phone, email, or identifier.",
                     "これは破壊的な操作のため一括実行できません。削除する1件の番号、電話番号、メールアドレス、または identifier を指定してください。"
-                ))
+                )
             }
 
             if destructiveTargetNeedsDisambiguation(arguments) {
-                return SideEffectGateBlock(reply: tr(
+                return tr(
                     "这个删除操作还没有精确到单个对象。请提供要删除对象的编号、电话、邮箱或 identifier。",
                     "This delete action is not narrowed to a single item yet. Please provide the item's number, phone, email, or identifier.",
                     "この削除操作はまだ1件に絞り込まれていません。削除対象の番号、電話番号、メールアドレス、または identifier を指定してください。"
-                ))
+                )
             }
-        }
-
-        if policy.confirmation == .always {
-            return SideEffectGateBlock(reply: destructiveConfirmationPrompt(
-                displayName: displayName,
-                toolName: toolName,
-                arguments: arguments
-            ))
         }
 
         if policy.confirmation == .lowConfidence,
@@ -935,7 +918,7 @@ extension AgentEngine {
                arguments: arguments,
                userQuestion: userQuestion
            ) {
-            return SideEffectGateBlock(reply: issue)
+            return issue
         }
 
         return nil
@@ -1046,44 +1029,15 @@ extension AgentEngine {
             .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
     }
 
-    private func destructiveConfirmationPrompt(
-        displayName: String,
-        toolName: String,
-        arguments: [String: Any]
-    ) -> String {
-        let summary = sideEffectArgumentSummary(arguments)
-        _ = displayName
-        _ = toolName
-        return tr(
-            "请确认是否执行这个删除操作：\(summary)。确认后请明确回复要删除的对象。",
-            "Please confirm this delete action: \(summary). To proceed, reply with explicit confirmation and the item to delete.",
-            "この削除操作を確認してください：\(summary)。続行する場合は、削除対象を明示して確認してください。"
-        )
-    }
-
-    private func sideEffectArgumentSummary(_ arguments: [String: Any]) -> String {
-        let preferredKeys = ["title", "name", "phone", "email", "identifier", "query", "due", "start", "text"]
-        let parts = preferredKeys.compactMap { key -> String? in
-            guard let value = arguments[key] else { return nil }
-            let text = "\(value)".trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return nil }
-            return "\(key)=\(text)"
-        }
-        if !parts.isEmpty {
-            return parts.joined(separator: ", ")
-        }
-        return tr("当前请求", "the current request", "現在のリクエスト")
-    }
-
     private func looksLikeBulkDestructiveIntent(_ userQuestion: String) -> Bool {
         let normalized = userQuestion
             .lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return false }
-        return [
-            "全部", "都删", "都删除", "都移除", "两个都", "一起删", "一起删除",
-            "all", "both", "every", "delete all", "remove all"
-        ].contains { normalized.contains($0) }
+        let words = Set(normalized.components(separatedBy: CharacterSet.alphanumerics.inverted))
+        return !words.isDisjoint(with: ["all", "both", "every"])
+            || ["全部", "都删", "都删除", "都移除", "两个都", "一起删", "一起删除"]
+                .contains { normalized.contains($0) }
     }
 
     private func destructiveTargetNeedsDisambiguation(_ arguments: [String: Any]) -> Bool {
@@ -2997,24 +2951,6 @@ extension AgentEngine {
             arguments: call.arguments,
             userQuestion: userQuestion
         )
-
-        if let block = sideEffectGateBlock(
-            skillId: ownerSkillId,
-            displayName: displayName,
-            toolName: canonicalCallName,
-            arguments: normalizedCallArguments,
-            userQuestion: userQuestion
-        ) {
-            guard updateMessageStateIfCurrent(
-                at: cardIndex,
-                role: .system,
-                content: "done",
-                skillName: displayName
-            ) else { return }
-            messages.append(ChatMessage(role: .assistant, content: block.reply))
-            finishTurnIfCurrentToolChainSession()
-            return
-        }
 
         guard updateMessageStateIfCurrent(
             at: cardIndex,

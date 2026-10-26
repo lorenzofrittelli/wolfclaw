@@ -14,14 +14,14 @@ enum ContactsTools {
         registry.register(RegisteredTool(
             name: "contacts-upsert",
             description: tr(
-                "创建或更新联系人；若提供手机号则优先按手机号查重再更新",
-                "Create or update a contact; when a phone number is provided, dedupe by phone first and update the matching contact",
-                "連絡先を作成または更新します。電話番号が指定された場合は、まず電話番号で重複を確認してから更新します"
+                "创建或更新联系人；按 identifier 或准确的电话、邮箱匹配，保留原姓名及现有联系方式。多个匹配时须消歧",
+                "Create or update a contact using an identifier or exact phone/email match; preserve the existing name and contact details, and disambiguate multiple matches",
+                "識別子または電話番号・メールの完全一致で連絡先を作成・更新します。既存の名前と連絡先情報を保持し、複数一致時は絞り込みます"
             ),
             parameters: tr(
-                "name: 联系人姓名, phone: 手机号（可选）, company: 公司（可选）, email: 邮箱（可选）, notes: 备注（可选）",
-                "name: contact name, phone: phone number (optional), company: company (optional), email: email address (optional), notes: notes (optional)",
-                "name: 連絡先の名前, phone: 電話番号（任意）, company: 会社（任意）, email: メールアドレス（任意）, notes: メモ（任意）"
+                "name: 联系人姓名, identifier: 已有联系人标识（可选）, phone: 要添加的电话（可选）, company: 公司（可选）, email: 要添加的邮箱（可选）, notes: 备注（可选）",
+                "name: contact name, identifier: existing contact identifier (optional), phone: phone number to add (optional), company: company (optional), email: email address to add (optional), notes: notes (optional)",
+                "name: 連絡先の名前, identifier: 既存連絡先の識別子（任意）, phone: 追加する電話番号（任意）, company: 会社（任意）, email: 追加するメールアドレス（任意）, notes: メモ（任意）"
             ),
             phoneGroundContract: contactsContract,
             requiredParameters: ["name"],
@@ -97,19 +97,6 @@ enum ContactsTools {
             CNContactOrganizationNameKey as CNKeyDescriptor,
             CNContactEmailAddressesKey as CNKeyDescriptor
         ]
-    }
-
-    private static func findExistingContact(phone: String) throws -> CNContact? {
-        let trimmed = phone.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        let predicate = CNContact.predicateForContacts(
-            matching: CNPhoneNumber(stringValue: trimmed)
-        )
-        return try SystemStores.contacts.unifiedContacts(
-            matching: predicate,
-            keysToFetch: contactKeysToFetch()
-        ).first
     }
 
     private static func allContacts() throws -> [CNContact] {
@@ -369,6 +356,7 @@ enum ContactsTools {
         let company = (args["company"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let email = (args["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let notes = (args["notes"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let identifier = ContactUpdatePolicy.nonempty(args["identifier"] as? String)
 
         #if !os(iOS)
         let result = MacContactsMock.upsert(name: name, phone: phone, company: company, email: email, notes: notes)
@@ -405,11 +393,34 @@ enum ContactsTools {
             )
         }
 
-        let existingContact: CNContact?
-        if let phone, !phone.isEmpty {
-            existingContact = try findExistingContact(phone: phone)
+        let candidates: [CNContact]
+        if let identifier {
+            candidates = try SystemStores.contacts.unifiedContacts(
+                matching: CNContact.predicateForContacts(withIdentifiers: [identifier]),
+                keysToFetch: contactKeysToFetch()
+            )
+        } else if ContactUpdatePolicy.nonempty(phone) != nil || ContactUpdatePolicy.nonempty(email) != nil {
+            candidates = try allContacts()
         } else {
-            existingContact = nil
+            candidates = []
+        }
+        let matches = ContactUpdatePolicy.matchingContacts(
+            in: candidates, identifier: identifier, phone: phone, email: email
+        )
+        guard matches.count <= 1 else {
+            return contactsFailure(
+                summary: tr("匹配到多个联系人，请提供 identifier。", "Multiple contacts matched. Please provide the contact identifier.", "複数の連絡先が一致しました。連絡先識別子を指定してください。"),
+                detail: tr("未修改联系人：匹配不唯一。", "No contact was changed: the match is ambiguous.", "一致が一意ではないため、連絡先を変更していません。"),
+                errorCode: "CONTACTS_AMBIGUOUS_MATCH"
+            )
+        }
+        let existingContact = matches.first
+        if identifier != nil, existingContact == nil {
+            return contactsFailure(
+                summary: tr("未找到指定联系人。", "The specified contact was not found.", "指定された連絡先が見つかりませんでした。"),
+                detail: tr("identifier 无匹配；未创建或修改联系人。", "No match for identifier; no contact was created or changed.", "識別子に一致する連絡先がなく、作成・変更していません。"),
+                errorCode: "CONTACTS_NOT_FOUND"
+            )
         }
 
         let mutableContact: CNMutableContact
@@ -422,28 +433,11 @@ enum ContactsTools {
             action = "created"
         }
 
-        mutableContact.givenName = name
-        mutableContact.familyName = ""
-
-        if let phone, !phone.isEmpty {
-            mutableContact.phoneNumbers = [
-                CNLabeledValue(
-                    label: CNLabelPhoneNumberMobile,
-                    value: CNPhoneNumber(stringValue: phone)
-                )
-            ]
-        }
-        if let company, !company.isEmpty {
-            mutableContact.organizationName = company
-        }
-        if let email, !email.isEmpty {
-            mutableContact.emailAddresses = [
-                CNLabeledValue(label: CNLabelWork, value: email as NSString)
-            ]
-        }
-        if let notes, !notes.isEmpty {
-            mutableContact.note = notes
-        }
+        ContactUpdatePolicy.apply(
+            .init(name: name, phone: phone, company: company, email: email, notes: notes),
+            to: mutableContact,
+            isExisting: existingContact != nil
+        )
 
         let saveRequest = CNSaveRequest()
         if existingContact != nil {
@@ -451,20 +445,24 @@ enum ContactsTools {
         } else {
             saveRequest.add(mutableContact, toContainerWithIdentifier: nil)
         }
+        // Non scrivere dopo una cancellazione avvenuta durante il consenso TCC.
+        try Task.checkCancellation()
         try SystemStores.contacts.execute(saveRequest)
 
+        let savedName = formattedContactName(mutableContact)
         let summary: String = {
             if action == "updated" {
-                return tr("已更新联系人\u{201C}\(name)\u{201D}。", "Updated contact \u{201C}\(name)\u{201D}.", "連絡先\u{201C}\(name)\u{201D}を更新しました。")
+                return tr("已更新联系人\u{201C}\(savedName)\u{201D}。", "Updated contact \u{201C}\(savedName)\u{201D}.", "連絡先\u{201C}\(savedName)\u{201D}を更新しました。")
             } else {
-                return tr("已创建联系人\u{201C}\(name)\u{201D}。", "Created contact \u{201C}\(name)\u{201D}.", "連絡先\u{201C}\(name)\u{201D}を作成しました。")
+                return tr("已创建联系人\u{201C}\(savedName)\u{201D}。", "Created contact \u{201C}\(savedName)\u{201D}.", "連絡先\u{201C}\(savedName)\u{201D}を作成しました。")
             }
         }()
         let detail = successPayload(
             result: summary,
             extras: [
                 "action": action,
-                "name": name,
+                "identifier": mutableContact.identifier,
+                "name": savedName,
                 "phone": phone.map(ContactsTools.displayPhoneNumber) ?? "",
                 "company": company ?? "",
                 "email": email ?? "",
@@ -719,6 +717,7 @@ enum ContactsTools {
             saveRequest.delete(mutableContact)
             deletedNames.append(formattedContactName(contact))
         }
+        try Task.checkCancellation()
         try SystemStores.contacts.execute(saveRequest)
 
         if matches.count == 1 {

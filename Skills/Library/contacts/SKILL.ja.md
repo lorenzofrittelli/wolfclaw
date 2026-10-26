@@ -50,8 +50,8 @@ examples:
     scenario: "連絡先を削除"
 
 # Sync anchor (see scripts/check-skill-sync.sh):
-translation-source-commit: afa08ec1
-translation-source-sha256: 75e6621c9d9ff05a822b7395716be9b1bbc008d5cc7b348ca90c6eaec092e056
+translation-source-commit: 698be7382a57aa90650be0e5bdedb367aa6b371d
+translation-source-sha256: b4ed791959fedf90918be4f0b74462d87248467a620ab913ca1bd892e210a460
 ---
 
 # 連絡先の検索と管理
@@ -68,9 +68,10 @@ translation-source-sha256: 75e6621c9d9ff05a822b7395716be9b1bbc008d5cc7b348ca90c6
   - `identifier`: 連絡先識別子
 - **contacts-upsert**: 連絡先を作成または更新
   - `name`: 必須。連絡先名
-  - `phone`: 任意。電話番号。指定されていれば重複判定で優先される
+  - `identifier`: 任意。既存連絡先の安定した識別子。更新では優先して使う
+  - `phone`: 任意。追加する完全な電話番号。番号全体で重複判定し、他の番号を保持する
   - `company`: 任意。会社名
-  - `email`: 任意。メールアドレス
+  - `email`: 任意。追加するメールアドレス。他のアドレスとラベルを保持する
   - `notes`: 任意。メモ
 - **contacts-delete**: 連絡先を削除
   - `query`: キーワード。あいまい検索に使える
@@ -96,7 +97,7 @@ translation-source-sha256: 75e6621c9d9ff05a822b7395716be9b1bbc008d5cc7b348ca90c6
 5. 電話番号、メール、連絡先情報の照会: `contacts-search` を呼び出す
 6. 保存、追加、更新: `contacts-upsert` を呼び出す
 7. 照会ではできるだけ `name` を抽出し、不明なら `query` を使う
-8. 保存/更新では name, phone, company, email, notes を抽出する
+8. 保存/更新では name, phone, company, email, notes を抽出する。更新では先に検索し、既存連絡先の identifier を使う。既存の名前・姓・未指定の項目を保持し、name を改名指示として扱わない。電話やメールが複数の連絡先に一致したら、任意に選ばず先に候補を絞り込む。
 9. 保存に必須の `name` が欠けている場合だけ、短く質問する
 10. ツール成功後は、結果を日本語で簡潔に返す
 

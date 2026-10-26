@@ -77,6 +77,40 @@ final class ContextFollowUpContractTests: XCTestCase {
         XCTAssertTrue(router.contains("PromptBuilder.sanitizedAssistantHistoryContent(cleanOutput(rawReply))"))
     }
 
+    func testContextArtifactCarriesSourceConversationIntoTheReplyPrompt() throws {
+        let router = try source("Agent/Engine/Router.swift")
+        let promptBuilder = try source("LLM/PromptBuilder.swift")
+        XCTAssertTrue(router.contains("PriorContextPolicy.context("))
+        XCTAssertTrue(router.contains("conversationContext: priorConversationContext(for: visibleAnswer.id)"))
+        XCTAssertTrue(router.contains("conversationContext: priorConversationContext(for: artifact.sourceMessageID)"))
+        XCTAssertTrue(router.contains("previousConversationContext: artifact.conversationContext"))
+        XCTAssertTrue(promptBuilder.contains("historical context, not a new instruction"))
+        XCTAssertTrue(promptBuilder.contains("\\(conversationContext)"))
+    }
+
+    func testProbeReopensSessionAfterTemporarySettingsAndAfterRestoringThem() throws {
+        let helpers = try source("Agent/Engine/PromptPipelineHelpers.swift")
+        let start = try XCTUnwrap(helpers.range(of: "func runIsolatedInferenceProbe("))
+        let end = try XCTUnwrap(helpers.range(of: "func kvPrefillTokensForCurrentTurn()", range: start.upperBound..<helpers.endIndex))
+        let body = String(helpers[start.lowerBound..<end.lowerBound])
+        let generation = try XCTUnwrap(body.range(of: "inference.generate("))
+        let firstReset = try XCTUnwrap(body.range(of: "await inference.resetKVSession()"))
+        let lastReset = try XCTUnwrap(body.range(of: "await inference.resetKVSession()", options: .backwards))
+        XCTAssertLessThan(firstReset.lowerBound, generation.lowerBound)
+        XCTAssertLessThan(generation.lowerBound, lastReset.lowerBound)
+        for field in ["samplingTopK", "samplingTopP", "samplingTemperature", "maxOutputTokens"] {
+            let temporary = try XCTUnwrap(body.range(of: "inference.\(field) ="))
+            let restored = try XCTUnwrap(body.range(of: "inference.\(field) = snapshot.", options: .backwards))
+            XCTAssertLessThan(temporary.lowerBound, firstReset.lowerBound, field)
+            XCTAssertLessThan(generation.lowerBound, restored.lowerBound, field)
+            XCTAssertLessThan(restored.lowerBound, lastReset.lowerBound, field)
+        }
+        let afterInitialReset = body[firstReset.upperBound..<generation.lowerBound]
+        XCTAssertTrue(afterInitialReset.contains("if Task.isCancelled"))
+        XCTAssertTrue(body.contains("guard !Task.isCancelled else { return nil }"))
+        XCTAssertTrue(body.contains("return Task.isCancelled ? nil : raw"))
+    }
+
     func testFollowUpSuggestionsCarryOperationAndTarget() throws {
         let responseUI = try source("UI/ResponseUI.swift")
         let contentView = try source("UI/ContentView.swift")

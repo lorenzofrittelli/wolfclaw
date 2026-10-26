@@ -78,6 +78,44 @@ final class LANDiscoveryService {
         discovered = []
     }
 
+    /// Ricerca fresca anche quando la schermata Mac ha fermato il browser UI.
+    /// L'identità deve provenire dal macID stabile, mai dal nome del servizio.
+    func findMac(macID: String, timeout: TimeInterval = 2) async -> DiscoveredMac? {
+        let browser = NWBrowser(
+            for: .bonjourWithTXTRecord(type: LANService.type, domain: nil),
+            using: NWParameters()
+        )
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let once = LANOnceFlag()
+                @Sendable func finish(_ mac: DiscoveredMac?) {
+                    guard once.fire() else { return }
+                    browser.cancel()
+                    continuation.resume(returning: mac)
+                }
+                browser.browseResultsChangedHandler = { results, _ in
+                    for result in results {
+                        guard case let .service(name, _, _, _) = result.endpoint,
+                              case let .bonjour(txt) = result.metadata,
+                              txt[LANService.txtKeyID] == macID else { continue }
+                        finish(DiscoveredMac(id: name, name: name, macID: macID, endpoint: result.endpoint))
+                        return
+                    }
+                }
+                browser.stateUpdateHandler = { state in
+                    switch state {
+                    case .failed, .cancelled: finish(nil)
+                    default: break
+                    }
+                }
+                browser.start(queue: .main)
+                DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { finish(nil) }
+            }
+        } onCancel: {
+            browser.cancel()
+        }
+    }
+
     /// 把一个 Bonjour endpoint 解析成 host:port (给 URLSession)。短连一次拿 remoteEndpoint。
     func resolve(_ endpoint: NWEndpoint, timeout: TimeInterval = 6) async -> (host: String, port: UInt16)? {
         await withCheckedContinuation { (cont: CheckedContinuation<(host: String, port: UInt16)?, Never>) in

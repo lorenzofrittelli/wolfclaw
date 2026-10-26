@@ -93,6 +93,17 @@ class AgentEngine {
     var didSetup = false
     var config = ModelConfig()
 
+    var toolConfirmationState = ToolConfirmationState()
+    var pendingToolConfirmation: ToolConfirmationRequest? { toolConfirmationState.pending }
+    /// La UI abilita le conferme soltanto mentre l'app è in primo piano.
+    var toolConfirmationUIEnabled = false {
+        didSet {
+            if !toolConfirmationUIEnabled { cancelPendingToolConfirmation() }
+        }
+    }
+    @ObservationIgnored var toolConfirmationContinuation: (id: UUID, continuation: CheckedContinuation<Bool, Never>)?
+    @ObservationIgnored var toolConfirmationTimeoutTask: Task<Void, Never>?
+
     @ObservationIgnored private var pendingStreamingContentByMessageID: [UUID: String] = [:]
     @ObservationIgnored private var streamingUIFlushTask: Task<Void, Never>?
     @ObservationIgnored private var isSessionPersistenceEnabled = true

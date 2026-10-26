@@ -37,8 +37,8 @@ examples:
     scenario: "Referring to prior context"
 
 # Sync anchor (see scripts/check-skill-sync.sh):
-translation-source-commit: 034c373
-translation-source-sha256: 89b5dfd5a5e9b071f81bb0fc73d5217134643dcd0d2aa4254c8aa7ea55e372f7
+translation-source-commit: 31bf61d3219f597f62b7672f94475148bca5de19
+translation-source-sha256: c17a699084805c82462f02c7a274d6cc5deb70983864b0efa87acbaeeaa780eb
 ---
 
 # Professional Translation
@@ -62,6 +62,7 @@ Output the translation directly, with no prefix, no explanation of the process, 
 **Faithfulness, Expressiveness, Elegance**: faithful to the original meaning + conforming to the target language's grammar and conventions + matching the register of the original (formal / colloquial / literary / technical).
 
 Specifically:
+- Translate the entire supplied source text, including text in quotes, after a colon, or in a code block. Preserve the opening, ending, greetings, interjections, and every clause; do not translate only the last clause.
 - Use equivalent expressions for idioms rather than literal translations ("画蛇添足" → "gild the lily")
 - In Chinese-to-English, supply omitted subjects; in English-to-Chinese, omit them following Chinese convention
 - For Japanese/Korean → Chinese/English, adjust SOV→SVO word order

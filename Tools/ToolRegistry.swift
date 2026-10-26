@@ -58,37 +58,14 @@ struct RegisteredTool {
     }
 
     func validates(arguments: [String: Any]) -> Bool {
-        if isParameterless {
-            return arguments.isEmpty
-        }
-
-        for parameter in requiredParameters {
-            guard Self.hasMeaningfulValue(arguments[parameter]) else {
-                return false
-            }
-        }
-
-        if !requiredAnyOfParameters.isEmpty,
-           !requiredAnyOfParameters.contains(where: { Self.hasMeaningfulValue(arguments[$0]) }) {
-            return false
-        }
-
-        return true
-    }
-
-    private static func hasMeaningfulValue(_ value: Any?) -> Bool {
-        switch value {
-        case let string as String:
-            return !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case let array as [Any]:
-            return !array.isEmpty
-        case let dictionary as [String: Any]:
-            return !dictionary.isEmpty
-        case nil:
-            return false
-        default:
-            return true
-        }
+        ToolArgumentValidator.validates(
+            arguments,
+            toolName: name,
+            parameters: parameters,
+            required: requiredParameters,
+            requiredAnyOf: requiredAnyOfParameters,
+            isParameterless: isParameterless
+        )
     }
 }
 

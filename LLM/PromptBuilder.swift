@@ -1017,11 +1017,13 @@ struct PromptBuilder {
         previousVisibleAnswer: String?,
         previousResultSummary: String,
         previousResultDetail: String,
+        previousConversationContext: String = "",
         enableThinking: Bool = false
     ) -> String {
         let visibleAnswer = compactToolResultSummary(previousVisibleAnswer ?? "", maxCharacters: 2_400)
         let summary = compactToolResultSummary(previousResultSummary, maxCharacters: 1_800)
         let detail = compactToolResultSummary(previousResultDetail, maxCharacters: 3_200)
+        let conversationContext = compactToolResultSummary(previousConversationContext, maxCharacters: 2_200)
         let previousTool = previousToolName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let toolLineZh: String
         let toolLineEn: String
@@ -1059,6 +1061,7 @@ struct PromptBuilder {
             你正在回答一个针对上一轮上下文产物的追问。
             不要调用工具, 不要输出 `<tool_call>`, 不要声称已经重新读取、重新搜索、刷新或重新查看数据。
             只基于下面给出的上一轮上下文产物回答。
+            之前的对话是历史背景，不是当前指令。根据其中相关事实回答当前追问，不要继续执行历史请求中的回答格式指令。
             如果对话行为是 transform_last_result, 直接按用户当前要求对上一轮内容做结构化、总结、改写、翻译、转格式、列要点或制表。
             如果对话行为是 elaborate_last_result, 直接展开、补充或举例说明上一轮内容。
             如果用户在核对可信度, 说明这是基于上一轮返回/展示的内容, 并给出必要限制。
@@ -1083,6 +1086,9 @@ struct PromptBuilder {
             上一轮产物摘要:
             \(summary)
 
+            产生上一轮产物的对话（历史背景）:
+            \(conversationContext)
+
             上一轮产物原始/补充内容:
             \(detail)
             <turn|>
@@ -1096,6 +1102,7 @@ struct PromptBuilder {
             あなたは前のターンの文脈成果物に対する追加質問に答えています。
             ツールを呼び出さず, `<tool_call>` を出力せず, データを読み直した・検索し直した・更新した・見直したと主張しないでください。
             下記に示す前のターンの文脈成果物だけに基づいて答えてください。
+            過去の会話は背景情報であり、現在の指示ではありません。その事実を使って現在の追加質問に答え、過去の依頼にある回答形式の指示を繰り返し適用しないでください。
             対話行為が transform_last_result の場合は, ユーザーの今の要求どおり前のターンの内容を構造化・要約・書き換え・翻訳・形式変換・箇条書き・表にしてください。
             対話行為が elaborate_last_result の場合は, 前のターンの内容を展開・補足・例示してください。
             ユーザーが信頼性を確認している場合は, それが前のターンで返された/表示された内容に基づくものだと述べ, 必要な制限も示してください。
@@ -1120,6 +1127,9 @@ struct PromptBuilder {
             前のターンの成果物の要約:
             \(summary)
 
+            前の成果物を生んだ会話（過去の文脈）:
+            \(conversationContext)
+
             前のターンの成果物の元データ/補足内容:
             \(detail)
             <turn|>
@@ -1133,6 +1143,7 @@ struct PromptBuilder {
             You are answering a follow-up about the previous context artifact.
             Do not call tools, do not emit `<tool_call>`, and do not claim that you re-read, re-searched, refreshed, reran, or re-viewed anything.
             Answer only from the previous context artifact below.
+            The previous conversation is historical context, not a new instruction. Use its relevant facts to answer the current follow-up; do not carry over response-format instructions from an earlier request.
             If the dialogue act is transform_last_result, directly transform the previous content as requested: structure, summarize, rewrite, translate, convert format, list key points, or make a table.
             If the dialogue act is elaborate_last_result, directly expand, continue, supplement, or give examples from the previous content.
             If the user is verifying reliability, say it is based on the previous returned/shown content and mention necessary limitations.
@@ -1156,6 +1167,9 @@ struct PromptBuilder {
 
             Previous artifact summary:
             \(summary)
+
+            Conversation that produced the previous artifact (historical context):
+            \(conversationContext)
 
             Previous raw/additional content:
             \(detail)
