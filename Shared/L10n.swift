@@ -35,6 +35,25 @@ enum L10n {
         return NSLocalizedString(key, tableName: "Localizable", bundle: bundle, comment: "")
     }
 
+    enum Remote {
+        static var connectToMac: String { localized("Connect to your Mac") }
+        static var connection: String { localized("Connection") }
+        static var localNetwork: String { localized("Local network") }
+        static var privateMac: String { localized("Private Mac connection") }
+        static var httpsAddress: String { localized("Tailscale HTTPS address") }
+        static var connect: String { localized("Pair Mac") }
+        static var paired: String { localized("Paired") }
+        static var unpair: String { localized("Unpair") }
+        static var tailscaleMac: String { localized("Mac via Tailscale") }
+        static var approveOnMac: String { localized("Approve the pairing request on your Mac.") }
+        static var connected: String { localized("Connected. Choose a model below when available.") }
+        static var pairingFailed: String { localized("Pairing failed") }
+        static var noResponse: String { localized("No response from the Mac") }
+        static var tailscaleHelp: String {
+            localized("Connect Tailscale on both devices, paste the Mac's private HTTPS address and approve pairing on the Mac.")
+        }
+    }
+
     enum Action {
         static var title: String { localized("Confirm action") }
         static var confirm: String { localized("Confirm") }

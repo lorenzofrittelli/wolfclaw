@@ -1,6 +1,43 @@
 import Foundation
 import CryptoKit
 
+enum MacBindingTransport: String, Codable, Sendable {
+    case lan
+    case tailscale
+
+    static func permitsReplacement(existing: MacBindingTransport?, proposed: MacBindingTransport) -> Bool {
+        existing != .tailscale || proposed == .tailscale
+    }
+}
+
+/// I dati del binding sono indipendenti dalla rete; le credenziali persistenti restano nel Keychain.
+struct MacBinding: Codable, Equatable, Sendable {
+    let macID: String
+    var name: String
+    var secret: String
+    var boundAt: Date
+    var endpoint: String? = nil
+    var transport: MacBindingTransport = .lan
+
+    private enum CodingKeys: String, CodingKey {
+        case macID, name, secret, boundAt, endpoint, transport
+    }
+}
+
+extension MacBinding {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        macID = try values.decode(String.self, forKey: .macID)
+        name = try values.decode(String.self, forKey: .name)
+        secret = try values.decode(String.self, forKey: .secret)
+        boundAt = try values.decode(Date.self, forKey: .boundAt)
+        endpoint = try values.decodeIfPresent(String.self, forKey: .endpoint)
+        // Solo i documenti precedenti senza il campo usano LAN; un valore sconosciuto fallisce.
+        transport = values.contains(.transport)
+            ? try values.decode(MacBindingTransport.self, forKey: .transport) : .lan
+    }
+}
+
 /// Verifica il possesso della credenziale prima di inviarla a un indirizzo LAN.
 /// Non cifra HTTP e non sostituisce TLS: un relay attivo resta fuori da questa garanzia.
 enum LANIdentityProof {
@@ -66,6 +103,22 @@ enum LANIdentityProof {
 }
 
 enum LANEndpointPolicy {
+    /// Serve usa un'origine HTTPS esplicita; niente credenziali URL, percorsi API o host simili.
+    static func tailscaleRoot(_ endpoint: String) -> URL? {
+        let clean = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.contains("%"), let url = URL(string: clean), let root = root(url),
+              root.scheme == "https", let host = root.host,
+              host.hasSuffix(".ts.net"), host.count <= 253,
+              let parts = URLComponents(url: root, resolvingAgainstBaseURL: false),
+              parts.port == nil || (1...65535).contains(parts.port!) else { return nil }
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count >= 4, labels.allSatisfy({ label in
+            !label.isEmpty && label.count <= 63 && label.first != "-" && label.last != "-"
+                && label.utf8.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }
+        }) else { return nil }
+        return root
+    }
+
     static func root(_ url: URL) -> URL? {
         guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
@@ -80,7 +133,11 @@ enum LANEndpointPolicy {
         return parts.url
     }
 
-    static func candidates(discovered: [URL], savedEndpoint: String?) -> [URL] {
+    static func candidates(discovered: [URL], savedEndpoint: String?, transport: MacBindingTransport = .lan) -> [URL] {
+        if transport == .tailscale {
+            // L'endpoint Tailscale è fissato dall'utente: nessun risultato Bonjour entra nei candidati.
+            return savedEndpoint.flatMap(tailscaleRoot).map { [$0] } ?? []
+        }
         let savedURL = savedEndpoint.flatMap(URL.init(string:))
         let saved = savedURL.flatMap(root)
         // Una futura configurazione HTTPS non deve tornare a HTTP tramite Bonjour.
@@ -107,11 +164,12 @@ enum LANEndpointPolicy {
     /// Il probe riceve solo sfida e URL, mai la credenziale Bearer.
     static func verifiedRoot(
         discovered: [URL], savedEndpoint: String?, macID: String, secret: String,
+        transport: MacBindingTransport = .lan,
         isCurrent: () -> Bool = { true },
         probe: (URL, LANIdentityProof.Challenge) async -> LANIdentityProof.Response?
     ) async -> URL? {
         guard isCurrent(), LANIdentityProof.usableSecret(secret) != nil else { return nil }
-        for root in candidates(discovered: discovered, savedEndpoint: savedEndpoint) {
+        for root in candidates(discovered: discovered, savedEndpoint: savedEndpoint, transport: transport) {
             guard !Task.isCancelled, isCurrent(),
                   let challenge = LANIdentityProof.challenge(secret: secret) else { return nil }
             let response = await probe(root, challenge)

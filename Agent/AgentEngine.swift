@@ -601,13 +601,23 @@ class AgentEngine {
     }
 
     /// 把所有已绑定 Mac 的远程模型刷进 catalog (UI 配对后 / 启动后调用)。
-    func refreshRemoteModels() async {
-        var all: [ModelDescriptor] = []
-        for binding in lan.bindings.all() {
+    func refreshRemoteModels(transport: MacBindingTransport? = nil) async {
+        let bindings = lan.bindings.all()
+        // La vista Tailscale aggiorna solo quei Mac, senza avviare la scoperta LAN.
+        // Mantiene nel catalogo i modelli dell'altro trasporto ancora associati.
+        let preservedIDs = Set(bindings.filter { transport != nil && $0.transport != transport }.map(\.macID))
+        var all = catalog.availableModels.filter { model in
+            let parts = model.id.components(separatedBy: "::")
+            return parts.count == 3 && parts[0] == "remote" && preservedIDs.contains(parts[1])
+        }
+        for binding in bindings where transport == nil || binding.transport == transport {
+            guard !Task.isCancelled else { return }
             all += await lan.remoteModels(for: binding)
         }
+        guard !Task.isCancelled else { return }
         catalog.setRemoteModels(all)
-        if config.selectedModelID.hasPrefix("remote::"),
+        if transport == nil,
+           config.selectedModelID.hasPrefix("remote::"),
            !all.contains(where: { $0.id == config.selectedModelID }),
            let replacement = all.first {
             config.selectedModelID = replacement.id

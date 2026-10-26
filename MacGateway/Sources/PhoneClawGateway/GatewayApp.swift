@@ -485,6 +485,9 @@ enum GatewayKeychain {
 @Observable
 final class GatewayModel {
     let port: UInt16 = 18080
+    private(set) var listenMode = GatewayListenMode.stored(
+        UserDefaults.standard.string(forKey: GatewayListenMode.defaultsKey)
+    )
     let displayName = Host.current().localizedName ?? "Mac"
     let address = ProcessInfo.processInfo.hostName
 
@@ -574,6 +577,7 @@ final class GatewayModel {
             port: port, macID: macID, name: displayName,
             providers: buildProviders(from: normalized),
             defaultProviderID: enabledConfigs.first?.name ?? "ollama",
+            listenMode: listenMode,
             onPairRequest: { [weak self] name in await self?.requestApproval(name) ?? false },
             onPairedChanged: { [weak self] in Task { @MainActor in self?.refreshPaired() } },
             onRuntimeEvent: { [weak self] message in
@@ -600,6 +604,16 @@ final class GatewayModel {
         running = false
         pendingApprovals.forEach { $0.resume(false) }   // 取消待审批,免得 continuation 悬空
         pendingApprovals.removeAll()
+    }
+
+    /// La scelta cambia solo il listener: Tailscale Serve viene configurato a parte.
+    func setListenMode(_ mode: GatewayListenMode) {
+        guard mode != listenMode else { return }
+        let restart = running
+        if restart { stop() }
+        listenMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: GatewayListenMode.defaultsKey)
+        if restart { start() }
     }
 
     private func handleRuntimeEvent(_ message: String) {
@@ -3383,10 +3397,35 @@ struct ProviderSettingsView: View {
                     .foregroundStyle(GatewayTheme.textTertiary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 320)
+                Divider()
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Collegamento iPhone")
+                        .font(.headline)
+                    Picker("Accesso", selection: Binding(
+                        get: { model.listenMode },
+                        set: { model.setListenMode($0) }
+                    )) {
+                        Text("LAN (Bonjour)").tag(GatewayListenMode.lan)
+                        Text("Tailscale (solo localhost)").tag(GatewayListenMode.loopbackOnly)
+                    }
+                    if model.listenMode == .loopbackOnly {
+                        Text("Destinazione locale: http://127.0.0.1:\(model.port)")
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                        Text("Configura Tailscale Serve HTTPS privato sulla porta 8446 verso questa destinazione. Sull’iPhone usa l’indirizzo HTTPS del Mac con :8446. Questa opzione non attiva Tailscale.")
+                            .font(.caption)
+                        Text("Bonjour è disattivato. Ogni nuova associazione richiede la tua approvazione sul Mac.")
+                            .font(.caption)
+                    } else {
+                        Text("Il gateway è raggiungibile sulla rete locale alla porta \(model.port) e visibile tramite Bonjour.")
+                            .font(.caption)
+                    }
+                }
+                .foregroundStyle(GatewayTheme.textPrimary)
             }
             .padding(28)
         }
-        .frame(width: 420, height: 260)
+        .frame(width: 540, height: 450)
     }
 }
 

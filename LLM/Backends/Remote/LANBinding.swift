@@ -15,14 +15,6 @@ import Security
 // secret:配对握手时跟 Mac 换得。持久化时只进 Keychain,UserDefaults 只保留
 // macID/name/endpoint 这些非秘密元数据。
 
-struct MacBinding: Codable, Equatable, Sendable {
-    let macID: String
-    var name: String
-    var secret: String        // 配对握手得来 (现阶段占位 pending-handshake)
-    var boundAt: Date
-    var endpoint: String? = nil   // 配对时 resolve 到的直连根 http://ip:port;之后不靠发现层也能连
-}
-
 /// 绑定持久化。UserDefaults JSON 只保存非秘密元数据;secret/token 存 Keychain。
 final class BindingStore {
     struct Snapshot {
@@ -34,6 +26,7 @@ final class BindingStore {
     private let defaults: UserDefaults
     private let lock = NSRecursiveLock()
     private var revisions: [String: UUID] = [:]
+    private var pairingRevision = UUID()
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
     func all() -> [MacBinding] {
@@ -79,6 +72,8 @@ final class BindingStore {
         lock.lock(); defer { lock.unlock() }
         guard let snapshot = snapshot(macID: expected.macID),
               snapshot.binding.boundAt == expected.boundAt,
+              snapshot.binding.transport == expected.transport,
+              expected.transport != .tailscale || snapshot.binding.endpoint == expected.endpoint,
               LANIdentityProof.usableSecret(snapshot.binding.secret) == LANIdentityProof.usableSecret(expected.secret) else { return nil }
         return snapshot
     }
@@ -88,6 +83,8 @@ final class BindingStore {
         guard revisions[snapshot.binding.macID] == snapshot.revision,
               let current = binding(macID: snapshot.binding.macID) else { return false }
         return current.boundAt == snapshot.binding.boundAt
+            && current.transport == snapshot.binding.transport
+            && (current.transport != .tailscale || current.endpoint == snapshot.binding.endpoint)
             && LANIdentityProof.usableSecret(current.secret) == LANIdentityProof.usableSecret(snapshot.binding.secret)
     }
 
@@ -97,13 +94,31 @@ final class BindingStore {
         guard isCurrent(snapshot) else { return false }
         var list = all()
         guard let index = list.firstIndex(where: { $0.macID == snapshot.binding.macID }) else { return false }
+        if list[index].transport == .tailscale {
+            // La verifica non modifica mai l'origine HTTPS fissata durante il pairing.
+            return list[index].endpoint.flatMap(LANEndpointPolicy.tailscaleRoot)?.absoluteString == endpoint
+        }
         list[index].endpoint = endpoint
         persist(list)
         return true
     }
 
-    func save(_ binding: MacBinding) {
+    func revisionForPairing() -> UUID {
         lock.lock(); defer { lock.unlock() }
+        return pairingRevision
+    }
+
+    @discardableResult
+    func save(_ binding: MacBinding, ifRevision expectedRevision: UUID? = nil) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard expectedRevision == nil || expectedRevision == pairingRevision,
+              MacBindingTransport.permitsReplacement(existing: self.binding(macID: binding.macID)?.transport,
+                                                       proposed: binding.transport) else { return false }
+        if binding.transport == .tailscale {
+            guard let endpoint = binding.endpoint,
+                  LANEndpointPolicy.tailscaleRoot(endpoint)?.absoluteString == endpoint else { return false }
+        }
+        pairingRevision = UUID()
         revisions[binding.macID] = UUID()
         let secret = binding.secret.trimmingCharacters(in: .whitespacesAndNewlines)
         if secret.isEmpty || secret == "(pending-handshake)" {
@@ -114,10 +129,12 @@ final class BindingStore {
         var list = all().filter { $0.macID != binding.macID }
         list.append(binding)
         persist(list)
+        return true
     }
 
     func remove(macID: String) {
         lock.lock(); defer { lock.unlock() }
+        pairingRevision = UUID()
         revisions[macID] = UUID()
         let remaining = all().filter { $0.macID != macID }
         RemoteBindingCredentialStore.deleteBindingSecret(macID: macID)
@@ -204,6 +221,8 @@ final class LANConnectionManager {
     let discovery = LANDiscoveryService()
     @ObservationIgnored let bindings: BindingStore
     @ObservationIgnored var lastPairError: String?   // 诊断:配对失败卡在哪一步(UI 显示)
+    @ObservationIgnored private let pairingLock = NSRecursiveLock()
+    @ObservationIgnored private var pairingOperationID: UUID?
 
     init(bindings: BindingStore = BindingStore()) {
         self.bindings = bindings
@@ -222,8 +241,7 @@ final class LANConnectionManager {
             secret: "(pending-handshake)",
             boundAt: Date()
         )
-        bindings.save(binding)
-        return binding
+        return bindings.save(binding) ? binding : nil
     }
 
     /// 按绑定自动重连:当前发现结果里按 macID 找回那台 Mac → resolve → 出 RemoteInferenceService base URL。
@@ -238,7 +256,8 @@ final class LANConnectionManager {
         guard LANIdentityProof.usableSecret(binding.secret) != nil else { return nil }
         // Bonjour prima della cache: l'IP assegnato al Mac può cambiare tra due turni.
         var discoveredRoots: [URL] = []
-        if let mac = await discovery.findMac(macID: binding.macID),
+        if binding.transport == .lan,
+           let mac = await discovery.findMac(macID: binding.macID),
            let root = await resolveRoot(mac.endpoint) {
             discoveredRoots.append(root)
         }
@@ -246,14 +265,9 @@ final class LANConnectionManager {
         guard let root = await LANEndpointPolicy.verifiedRoot(
             discovered: discoveredRoots, savedEndpoint: binding.endpoint,
             macID: binding.macID, secret: binding.secret,
+            transport: binding.transport,
             isCurrent: { self.bindings.isCurrent(snapshot) },
-            probe: { root, challenge in
-                guard let request = LANEndpointPolicy.identityRequest(root: root, challenge: challenge) else { return nil }
-                // Nessun Authorization: la risposta deve provare la conoscenza del token.
-                guard let (data, response) = try? await LANHTTPTransport.session.data(for: request),
-                      (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-                return try? JSONDecoder().decode(LANIdentityProof.Response.self, from: data)
-            }
+            probe: Self.probeIdentity
         ) else { return nil }
         guard !Task.isCancelled,
               bindings.refreshEndpoint(root.absoluteString, ifCurrent: snapshot) else { return nil }
@@ -380,19 +394,117 @@ final class LANConnectionManager {
 
     @discardableResult
     func pair(_ mac: DiscoveredMac, deviceName: String = LANConnectionManager.defaultDeviceName) async -> MacBinding? {
-        guard let root = await resolveRoot(mac.endpoint) else {
-            lastPairError = "解析 Mac 地址失败(resolve 不到 host)"
+        let operation = beginPairing()
+        defer { finishPairing(operation.id) }
+        if let macID = mac.macID, bindings.binding(macID: macID)?.transport == .tailscale {
+            failPairing(operation.id, key: "remote.error.downgradeBlocked",
+                        message: "Rimuovi prima l’associazione Tailscale per collegare questo Mac via LAN.")
             return nil
         }
+        guard let root = await resolveRoot(mac.endpoint) else {
+            failPairing(operation.id, key: "remote.error.lanResolutionFailed", message: "Impossibile risolvere l’indirizzo LAN del Mac.")
+            return nil
+        }
+        guard pairingIsCurrent(operation.id) else { return nil }
         guard let pair = await requestPairToken(root, deviceName: deviceName),
               mac.macID == nil || mac.macID == pair.macID else {
-            lastPairError = "握手失败:\(root.absoluteString)/pair 没返回 token(Mac 没弹窗/未允许/连不上)"
+            failPairing(operation.id, key: "remote.error.lanPairingFailed", message: "Pairing non riuscito: verifica la rete e l’approvazione sul Mac.")
             return nil
         }
-        lastPairError = nil
+        guard pairingIsCurrent(operation.id) else { return nil }
+        if bindings.binding(macID: pair.macID)?.transport == .tailscale {
+            failPairing(operation.id, key: "remote.error.downgradeBlocked",
+                        message: "Rimuovi prima l’associazione Tailscale per collegare questo Mac via LAN.")
+            return nil
+        }
         let binding = MacBinding(macID: pair.macID, name: mac.name, secret: pair.token, boundAt: Date(), endpoint: root.absoluteString)
-        bindings.save(binding)
-        return binding
+        return savePairing(binding, operation: operation) ? binding : nil
+    }
+
+    /// Pairing manuale via Serve: HTTPS verifica il nome, la prova HMAC verifica il nuovo token.
+    @discardableResult
+    func pairTailscale(endpoint: String, name: String, deviceName: String = LANConnectionManager.defaultDeviceName) async -> MacBinding? {
+        let operation = beginPairing()
+        defer { finishPairing(operation.id) }
+        guard let root = LANEndpointPolicy.tailscaleRoot(endpoint) else {
+            failPairing(operation.id, key: "remote.error.invalidTailscaleEndpoint",
+                        message: "Inserisci un indirizzo HTTPS .ts.net senza percorso, utente, query o frammento.")
+            return nil
+        }
+        guard pairingIsCurrent(operation.id),
+              let pair = await requestPairToken(root, deviceName: deviceName) else {
+            failPairing(operation.id, key: "remote.error.tailscalePairingFailed",
+                        message: "Pairing non riuscito: verifica Tailscale, Serve e l’approvazione sul Mac.")
+            return nil
+        }
+        guard let verified = await LANEndpointPolicy.verifiedRoot(
+            discovered: [], savedEndpoint: root.absoluteString, macID: pair.macID, secret: pair.token,
+            transport: .tailscale,
+            isCurrent: { self.pairingIsCurrent(operation.id) && self.bindings.revisionForPairing() == operation.storeRevision },
+            probe: Self.probeIdentity
+        ), verified == root else {
+            failPairing(operation.id, key: "remote.error.identityFailed", message: "Il Mac non ha superato la verifica d’identità.")
+            return nil
+        }
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let binding = MacBinding(macID: pair.macID, name: cleanName.isEmpty ? root.host! : cleanName,
+                                 secret: pair.token, boundAt: Date(), endpoint: root.absoluteString, transport: .tailscale)
+        return savePairing(binding, operation: operation) ? binding : nil
+    }
+
+    /// Chiamata dalla UI quando cambia modalità o chiude la schermata; una risposta tardiva non salva nulla.
+    func cancelPairing() {
+        pairingLock.lock(); defer { pairingLock.unlock() }
+        pairingOperationID = nil
+        lastPairError = nil
+    }
+
+    private struct PairingOperation {
+        let id: UUID
+        let storeRevision: UUID
+    }
+
+    private func beginPairing() -> PairingOperation {
+        pairingLock.lock(); defer { pairingLock.unlock() }
+        let operation = PairingOperation(id: UUID(), storeRevision: bindings.revisionForPairing())
+        pairingOperationID = operation.id
+        lastPairError = nil
+        return operation
+    }
+
+    private func pairingIsCurrent(_ id: UUID) -> Bool {
+        pairingLock.lock(); defer { pairingLock.unlock() }
+        return !Task.isCancelled && pairingOperationID == id
+    }
+
+    private func finishPairing(_ id: UUID) {
+        pairingLock.lock(); defer { pairingLock.unlock() }
+        if pairingOperationID == id { pairingOperationID = nil }
+    }
+
+    private func failPairing(_ id: UUID, key: String, message: String) {
+        pairingLock.lock(); defer { pairingLock.unlock() }
+        guard pairingIsCurrent(id) else { return }
+        lastPairError = NSLocalizedString(key, value: message, comment: "Errore del collegamento Mac")
+    }
+
+    private func savePairing(_ binding: MacBinding, operation: PairingOperation) -> Bool {
+        pairingLock.lock(); defer { pairingLock.unlock() }
+        guard pairingIsCurrent(operation.id) else { return false }
+        guard bindings.save(binding, ifRevision: operation.storeRevision) else {
+            failPairing(operation.id, key: "remote.error.pairingChanged", message: "Associazione annullata o modificata. Riprova.")
+            return false
+        }
+        lastPairError = nil
+        return true
+    }
+
+    private static func probeIdentity(root: URL, challenge: LANIdentityProof.Challenge) async -> LANIdentityProof.Response? {
+        guard let request = LANEndpointPolicy.identityRequest(root: root, challenge: challenge) else { return nil }
+        // Nessun Authorization: la risposta deve provare la conoscenza del token.
+        guard let (data, response) = try? await LANHTTPTransport.session.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return try? JSONDecoder().decode(LANIdentityProof.Response.self, from: data)
     }
 
     private func requestPairToken(_ root: URL, deviceName: String) async -> (token: String, macID: String)? {
@@ -408,7 +520,7 @@ final class LANConnectionManager {
                   let token = json["token"] as? String,
                   LANIdentityProof.usableSecret(token) != nil,
                   let macID = json["macID"] as? String, !macID.isEmpty,
-                  !macID.contains("\0") else { return nil }
+                  !macID.contains("\0"), !macID.contains("::") else { return nil }
             return (token, macID)
         } catch { return nil }
     }

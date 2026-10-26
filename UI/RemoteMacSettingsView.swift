@@ -23,6 +23,10 @@ struct RemoteMacSettingsView: View {
     @State private var pairingKey: String?
     @State private var status: String?
     @State private var statusOK = false
+    @State private var useTailscale = true
+    @State private var tailscaleEndpoint = ""
+    @State private var tailscaleBindings: [MacBinding] = []
+    @State private var pairingTask: Task<Void, Never>?
 
     private var deviceName: String {
         #if canImport(UIKit)
@@ -37,7 +41,12 @@ struct RemoteMacSettingsView: View {
     }
 
     private var remoteModels: [ModelDescriptor] {
-        engine.availableModels.filter { $0.id.hasPrefix("remote::") }
+        let transport: MacBindingTransport = useTailscale ? .tailscale : .lan
+        let macIDs = Set(engine.lan.bindings.all().filter { $0.transport == transport }.map(\.macID))
+        return engine.availableModels.filter { model in
+            let parts = model.id.components(separatedBy: "::")
+            return parts.count == 3 && parts[0] == "remote" && macIDs.contains(parts[1])
+        }
     }
 
     /// 绑定/配对统一用的 key:优先 TXT 稳定 macID,读不到就用 Bonjour 服务名(始终有)。
@@ -56,7 +65,17 @@ struct RemoteMacSettingsView: View {
                         if let status {
                             statusLine(status)
                         }
-                        macSection
+                        Picker(L10n.Remote.connection, selection: $useTailscale) {
+                            Text("Tailscale").tag(true)
+                            Text(L10n.Remote.localNetwork).tag(false)
+                        }
+                        .pickerStyle(.segmented)
+                        .disabled(pairingKey != nil)
+                        if useTailscale {
+                            tailscaleSection
+                        } else {
+                            macSection
+                        }
                         if !remoteModels.isEmpty {
                             remoteModelsSection
                         }
@@ -69,10 +88,24 @@ struct RemoteMacSettingsView: View {
             }
         }
         .onAppear {
-            engine.lan.startDiscovery()
-            Task { await engine.refreshRemoteModels() }
+            refreshTailscaleBindings()
+            if tailscaleEndpoint.isEmpty {
+                tailscaleEndpoint = tailscaleBindings.first?.endpoint ?? ""
+            }
+            if !useTailscale { engine.lan.startDiscovery() }
+            Task { await engine.refreshRemoteModels(transport: useTailscale ? .tailscale : .lan) }
         }
-        .onDisappear { engine.lan.stopDiscovery() }
+        .onChange(of: useTailscale) { _, useTailscale in
+            cancelPairing()
+            status = nil
+            if useTailscale { engine.lan.stopDiscovery() }
+            else { engine.lan.startDiscovery() }
+            Task { await engine.refreshRemoteModels(transport: useTailscale ? .tailscale : .lan) }
+        }
+        .onDisappear {
+            cancelPairing()
+            engine.lan.stopDiscovery()
+        }
     }
 
     // MARK: 头(居中标题 + 右上 ✕,跟 ModelSwitcherSheet 的标题同款静默)
@@ -100,6 +133,85 @@ struct RemoteMacSettingsView: View {
         .padding(.horizontal, 16)
         .padding(.top, 18)
         .padding(.bottom, 14)
+    }
+
+    // Il collegamento Tailscale usa un indirizzo HTTPS esplicito, senza scoperta LAN.
+    private var tailscaleSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader(L10n.Remote.privateMac)
+            Text(L10n.Remote.tailscaleHelp)
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.textSecondary)
+            TextField("https://mac.tailnet.ts.net:8446", text: $tailscaleEndpoint)
+                .textContentType(.URL)
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.system(size: 14))
+                .padding(12)
+                .background(Theme.borderSubtle.opacity(0.25))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .accessibilityLabel(L10n.Remote.httpsAddress)
+                .disabled(pairingKey != nil)
+            Button(action: pairTailscale) {
+                HStack {
+                    if pairingKey == "tailscale" { ProgressView().controlSize(.small) }
+                    Text(L10n.Remote.connect)
+                }
+            }
+            .disabled(pairingKey != nil || tailscaleEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            ForEach(tailscaleBindings, id: \.macID) { binding in
+                separator
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(binding.name).font(.system(size: 15))
+                        Text(binding.endpoint ?? "")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textSecondary)
+                            .textSelection(.enabled)
+                        Text(L10n.Remote.paired)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    Spacer()
+                    Button(L10n.Remote.unpair) { unpair(macID: binding.macID) }
+                        .disabled(pairingKey != nil)
+                }
+            }
+        }
+    }
+
+    private func refreshTailscaleBindings() {
+        tailscaleBindings = engine.lan.bindings.all().filter { $0.transport == .tailscale }
+    }
+
+    private func cancelPairing() {
+        pairingTask?.cancel()
+        pairingTask = nil
+        engine.lan.cancelPairing()
+        pairingKey = nil
+    }
+
+    private func pairTailscale() {
+        pairingKey = "tailscale"
+        status = L10n.Remote.approveOnMac
+        statusOK = false
+        let endpoint = tailscaleEndpoint
+        pairingTask = Task { @MainActor in
+            let binding = await engine.lan.pairTailscale(
+                endpoint: endpoint, name: L10n.Remote.tailscaleMac, deviceName: deviceName
+            )
+            guard !Task.isCancelled else { return }
+            if binding != nil { await engine.refreshRemoteModels(transport: useTailscale ? .tailscale : .lan) }
+            guard !Task.isCancelled else { return }
+            refreshTailscaleBindings()
+            pairingKey = nil
+            pairingTask = nil
+            statusOK = binding != nil
+            status = binding != nil
+                ? L10n.Remote.connected
+                : (engine.lan.lastPairError ?? L10n.Remote.pairingFailed)
+        }
     }
 
     // MARK: 状态(静默单行,不上卡片/绿底)
@@ -307,10 +419,13 @@ struct RemoteMacSettingsView: View {
             "Mac側で「許可」を押してください"
         )
         statusOK = false
-        Task {
+        pairingTask = Task { @MainActor in
             let binding = await engine.lan.pair(mac, deviceName: deviceName)
-            await engine.refreshRemoteModels()
+            guard !Task.isCancelled else { return }
+            await engine.refreshRemoteModels(transport: useTailscale ? .tailscale : .lan)
+            guard !Task.isCancelled else { return }
             pairingKey = nil
+            pairingTask = nil
             if binding != nil {
                 status = tr(
                     "已连接,选择下方模型即可",
@@ -331,12 +446,16 @@ struct RemoteMacSettingsView: View {
     }
 
     private func unpair(_ mac: DiscoveredMac) {
-        let k = key(mac)
+        unpair(macID: key(mac))
+    }
+
+    private func unpair(macID k: String) {
         // 解除的若正是当前在用的 Mac, 它的远程模型随即失效 → 记下, 稍后回退。
         let wasActive = engine.config.selectedModelID.hasPrefix("remote::\(k)::")
         engine.lan.bindings.remove(macID: k)
+        refreshTailscaleBindings()
         Task {
-            await engine.refreshRemoteModels()
+            await engine.refreshRemoteModels(transport: useTailscale ? .tailscale : .lan)
             if wasActive {
                 // 回退到已装本地模型;一个都没有就落到默认(自然触发顶栏「请先下载模型」)。
                 engine.config.selectedModelID = engine.installedModelID(preferredIDs: []) ?? ModelDescriptor.gemma4E2B.id

@@ -53,6 +53,120 @@ final class LANEndpointPolicyTests: XCTestCase {
         XCTAssertTrue(LANEndpointPolicy.candidates(discovered: [URL(string: "http://new-host")!], savedEndpoint: "https://saved-host?unexpected=x").isEmpty)
     }
 
+    func testLegacyBindingDecodesAsLANAndTailscaleRoundTrips() throws {
+        let legacy = Data(#"{"macID":"test-mac","name":"Test Mac","secret":"","boundAt":100,"endpoint":"http://mac.local:8080"}"#.utf8)
+        let binding = try JSONDecoder().decode(MacBinding.self, from: legacy)
+        XCTAssertEqual(binding.transport, .lan)
+        var upgraded = binding
+        upgraded.transport = .tailscale
+        upgraded.endpoint = "https://test-mac.test-tailnet.ts.net:8446"
+        XCTAssertEqual(try JSONDecoder().decode(MacBinding.self, from: JSONEncoder().encode(upgraded)), upgraded)
+    }
+
+    func testUnknownOrNullTransportNeverFallsBackToLAN() {
+        for transport in [#""unknown""#, "null", "123"] {
+            let data = Data("{\"macID\":\"test-mac\",\"name\":\"Test Mac\",\"secret\":\"\",\"boundAt\":100,\"transport\":\(transport)}".utf8)
+            XCTAssertThrowsError(try JSONDecoder().decode(MacBinding.self, from: data))
+        }
+    }
+
+    func testTailscaleOriginAcceptsHTTPSAndExplicitServePort() {
+        XCTAssertEqual(LANEndpointPolicy.tailscaleRoot("  HTTPS://TEST-MAC.TEST-TAILNET.TS.NET:8446/ \n")?.absoluteString,
+                       "https://test-mac.test-tailnet.ts.net:8446")
+        XCTAssertEqual(LANEndpointPolicy.tailscaleRoot("https://test-mac.test-tailnet.ts.net:443/")?.absoluteString,
+                       "https://test-mac.test-tailnet.ts.net")
+    }
+
+    func testTailscaleOriginRejectsDowngradeHostConfusionAndNonRootURLs() {
+        for value in [
+            "http://test-mac.test-tailnet.ts.net:8446", "https://ts.net", "https://test-mac.ts.net",
+            "https://test-mac.test-tailnet.ts.net.evil.example", "https://test-mac.test-tailnetts.net",
+            "https://user:secret@test-mac.test-tailnet.ts.net", "https://test-mac.test-tailnet.ts.net/v1",
+            "https://test-mac.test-tailnet.ts.net?query=x", "https://test-mac.test-tailnet.ts.net#fragment",
+            "https://test-mac.test-tailnet.ts.net:0", "https://test-mac.test-tailnet.ts.net:65536",
+            "https://test-mac..ts.net", "https://-test-mac.test-tailnet.ts.net", "https://test_mac.test-tailnet.ts.net",
+            "https://test-mac.test-tailnet.ts.net.", "https://%74est-mac.test-tailnet.ts.net",
+            "https://100.64.0.1:8446", "https://[::1]:8446"
+        ] {
+            XCTAssertNil(LANEndpointPolicy.tailscaleRoot(value), value)
+        }
+    }
+
+    func testTailscaleCandidateIsPinnedEvenWhenDiscoveryOffersAnotherHTTPSHost() {
+        let pinned = "https://test-mac.test-tailnet.ts.net:8446"
+        let discovered = [URL(string: "http://mac.local:8080")!, URL(string: "https://other-mac.test-tailnet.ts.net")!]
+        XCTAssertEqual(LANEndpointPolicy.candidates(discovered: discovered, savedEndpoint: pinned, transport: .tailscale), [URL(string: pinned)!])
+        for invalid in [nil, "http://mac.local", "https://other.example", "https://test-mac.test-tailnet.ts.net/v1"] {
+            XCTAssertTrue(LANEndpointPolicy.candidates(discovered: discovered, savedEndpoint: invalid, transport: .tailscale).isEmpty)
+        }
+    }
+
+    func testExistingTailscaleBindingCannotBeReplacedByLANWithoutRemoval() {
+        XCTAssertFalse(MacBindingTransport.permitsReplacement(existing: .tailscale, proposed: .lan))
+        XCTAssertTrue(MacBindingTransport.permitsReplacement(existing: .lan, proposed: .tailscale))
+        XCTAssertTrue(MacBindingTransport.permitsReplacement(existing: .tailscale, proposed: .tailscale))
+        XCTAssertTrue(MacBindingTransport.permitsReplacement(existing: nil, proposed: .lan))
+    }
+
+    func testScopedModelRefreshCannotAutoSelectAnotherTransportAndUIFiltersBindings() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let engine = try String(contentsOf: root.appendingPathComponent("Agent/AgentEngine.swift"), encoding: .utf8)
+        let refreshStart = try XCTUnwrap(engine.range(of: "func refreshRemoteModels(transport:"))
+        let refresh = String(engine[refreshStart.lowerBound...])
+        XCTAssertTrue(refresh.contains("for binding in bindings where transport == nil || binding.transport == transport"))
+        let published = try XCTUnwrap(refresh.range(of: "catalog.setRemoteModels(all)"))
+        let selection = try XCTUnwrap(refresh.range(of: "config.selectedModelID = replacement.id"))
+        let selectionGuard = String(refresh[published.upperBound..<selection.lowerBound])
+        XCTAssertNotNil(selectionGuard.range(of: #"if\s+transport\s*==\s*nil,"#, options: .regularExpression))
+
+        let view = try String(contentsOf: root.appendingPathComponent("UI/RemoteMacSettingsView.swift"), encoding: .utf8)
+        let selectorStart = try XCTUnwrap(view.range(of: "private var remoteModels:"))
+        let selectorEnd = try XCTUnwrap(view.range(of: "private func key(", range: selectorStart.upperBound..<view.endIndex))
+        let selector = view[selectorStart.lowerBound..<selectorEnd.lowerBound]
+        XCTAssertTrue(selector.contains("useTailscale ? .tailscale : .lan"))
+        XCTAssertTrue(selector.contains("bindings.all().filter { $0.transport == transport }"))
+        XCTAssertTrue(selector.contains("macIDs.contains(parts[1])"))
+    }
+
+    func testTailscaleProofFailureNeverTriesBonjourOrAnotherOrigin() async {
+        let pinned = URL(string: "https://test-mac.test-tailnet.ts.net:8446")!
+        var visited: [URL] = []
+        let result = await LANEndpointPolicy.verifiedRoot(
+            discovered: [URL(string: "http://mac.local:8080")!, URL(string: "https://other-mac.test-tailnet.ts.net")!],
+            savedEndpoint: pinned.absoluteString, macID: macID, secret: secret, transport: .tailscale
+        ) { url, challenge in
+            visited.append(url)
+            return LANIdentityProof.response(to: challenge, macID: "another-mac", secret: self.secret)
+        }
+        XCTAssertNil(result)
+        XCTAssertEqual(visited, [pinned])
+    }
+
+    func testTailscaleValidProofAcceptsOnlyThePinnedOrigin() async {
+        let pinned = URL(string: "https://test-mac.test-tailnet.ts.net:8446")!
+        let result = await LANEndpointPolicy.verifiedRoot(
+            discovered: [], savedEndpoint: pinned.absoluteString, macID: macID, secret: secret, transport: .tailscale
+        ) { url, challenge in
+            XCTAssertEqual(url, pinned)
+            return LANIdentityProof.response(to: challenge, macID: self.macID, secret: self.secret)
+        }
+        XCTAssertEqual(result, pinned)
+    }
+
+    func testTailscaleCancellationAfterProofRejectsAuthentication() async {
+        var current = true
+        let result = await LANEndpointPolicy.verifiedRoot(
+            discovered: [], savedEndpoint: "https://test-mac.test-tailnet.ts.net:8446", macID: macID,
+            secret: secret, transport: .tailscale, isCurrent: { current }
+        ) { _, challenge in
+            current = false
+            return LANIdentityProof.response(to: challenge, macID: self.macID, secret: self.secret)
+        }
+        XCTAssertNil(result)
+    }
+
     func testPreflightContainsNoBearerOrSecretInURLOrBody() throws {
         let challenge = try XCTUnwrap(LANIdentityProof.challenge(secret: secret))
         let request = try XCTUnwrap(LANEndpointPolicy.identityRequest(root: URL(string: "http://mac.local:8080")!, challenge: challenge))

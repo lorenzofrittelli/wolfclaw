@@ -1,0 +1,73 @@
+WolfClaw: collegamento privato iPhone–Mac con Tailscale
+
+Questa procedura usa il gateway compilato da questo fork aggiornato. Il percorso è:
+iPhone con Tailscale attivo → HTTPS del Mac sulla porta 8446 → Tailscale Serve → gateway su 127.0.0.1:18080 → provider scelto sul Mac.
+L'indirizzo di esempio in questo documento è fittizio; sostituirlo con quello mostrato da Tailscale sul proprio Mac.
+
+1. Preparare i dispositivi
+
+Collegare Mac e iPhone alla stessa tailnet. Sull'iPhone aprire Tailscale e verificare che la connessione sia attiva. Il Mac deve restare acceso, raggiungibile e con il gateway avviato; i due dispositivi possono usare reti diverse.
+
+Per HTTPS servono MagicDNS e i certificati HTTPS abilitati nella tailnet. Serve indica il collegamento di consenso se manca una configurazione necessaria. Le regole di accesso della tailnet devono consentire all'iPhone di raggiungere il Mac sulla porta TCP 8446. Usare Serve privato: non attivare Funnel per questo gateway.
+Riferimenti: https://tailscale.com/docs/features/tailscale-serve e https://tailscale.com/docs/how-to/set-up-https-certificates
+
+2. Limitare il gateway al Mac
+
+Chiudere eventuali istanze di PhoneClawGateway. Dalla cartella del repository:
+
+    cd MacGateway
+    bash build-app.sh
+    defaults write ai.phoneclaw.gateway PhoneClaw.gateway.listenMode -string loopbackOnly
+    open PhoneClawGateway.app
+
+La preferenza prima dell'avvio evita che la nuova istanza parta in modalità LAN. Non modifica i provider, le loro credenziali o i modelli. Se il gateway è già aperto, scegliere Impostazioni (⌘,) → Collegamento iPhone → Accesso → Tailscale (solo localhost). Il listener viene riavviato con la nuova modalità.
+
+Verificare nel gateway l'indicazione 127.0.0.1:18080. Il controllo da terminale è:
+
+    lsof -nP -iTCP:18080 -sTCP:LISTEN
+
+L'ascolto del gateway deve essere 127.0.0.1:18080, non *:18080 o un indirizzo della LAN. In questa modalità il gateway non pubblica Bonjour. Le installazioni senza la nuova preferenza mantengono il precedente default LAN: selezionare esplicitamente la modalità Tailscale.
+
+3. Aggiungere solo il servizio dedicato
+
+Nel terminale del Mac usare il comando tailscale disponibile nella propria installazione. Se non è nel PATH, usare il percorso CLI indicato dall'app Tailscale; non installare un secondo demone per questa procedura.
+
+Prima leggere la configurazione corrente:
+
+    tailscale serve status
+
+Se la porta 8446 è già assegnata a un altro servizio, non sovrascriverlo. Scegliere una porta dedicata libera e usarla anche nell'indirizzo sull'iPhone. Con 8446 libera:
+
+    tailscale serve --bg --https=8446 http://127.0.0.1:18080
+
+Ricontrollare lo stato: deve mostrare il proxy da HTTPS :8446 a http://127.0.0.1:18080; gli altri servizi devono restare presenti. L'opzione --bg mantiene Serve attivo in background, anche dopo un riavvio di Tailscale. Non eseguire reset, non sostituire l'intera configurazione e non aggiungere inoltri sul router.
+Riferimento comandi: https://tailscale.com/docs/reference/tailscale-cli/serve
+
+4. Approvare il pairing
+
+Sull'iPhone aprire WolfClaw → impostazioni → Mac Remote, scegliere Tailscale e inserire l'origine HTTPS completa mostrata da Serve. Esempio fittizio:
+
+    https://nome-mac.nome-tailnet.ts.net:8446
+
+Usare il nome .ts.net completo, HTTPS e la porta corretta. Non aggiungere /v1, credenziali, query o frammenti. Lo slash finale è ammesso. Non usare l'indirizzo HTTP 127.0.0.1:18080 sull'iPhone.
+
+Premere il pulsante di abbinamento e approvare sul Mac la richiesta del proprio iPhone. Non occorre copiare token: l'app verifica l'identità del gateway e conserva il segreto nel Portachiavi. Dopo la conferma, selezionare un modello remoto disponibile e inviare un messaggio di prova.
+
+Il collegamento Tailscale conserva l'indirizzo HTTPS scelto; non ripiega su Bonjour o HTTP. Per passare allo stesso Mac tramite LAN occorre prima rimuovere l'abbinamento, poi rifarlo nel percorso LAN.
+
+5. Capire dove avviene l'inferenza
+
+Tailscale cifra il traffico tra i dispositivi e HTTPS protegge il collegamento fino a Serve sul Mac; il tratto HTTP successivo resta sul loopback del Mac. I nomi DNS dei certificati HTTPS compaiono nei registri pubblici di Certificate Transparency, mentre l'accesso al servizio resta regolato dalla tailnet.
+Riferimento: https://tailscale.com/docs/how-to/set-up-https-certificates
+
+Il provider scelto nel gateway determina dove vengono elaborati i dati. Un provider remoto, o una CLI configurata per un servizio cloud, può inviare prompt e allegati a quel servizio. Per elaborazione sul Mac selezionare un provider e un modello effettivamente locali. Questa integrazione non abilita, disabilita o cambia automaticamente alcun provider cloud.
+
+6. Verificare o interrompere il collegamento
+
+Se il pairing fallisce, controllare in ordine: Tailscale connesso su entrambi i dispositivi; gateway in esecuzione sul loopback; proxy Serve e porta; nome HTTPS e certificato validi; regole di accesso della tailnet; richiesta approvata sul Mac. Se non compaiono modelli dopo il pairing, controllare il provider del gateway. Il modello Echo serve solo a provare il collegamento.
+
+Per interrompere esclusivamente il servizio aggiunto qui, dopo aver verificato che 8446 appartenga ancora a WolfClaw:
+
+    tailscale serve --bg --https=8446 off
+
+Usare la porta effettivamente scelta se diversa. Questo non rimuove l'abbinamento applicativo: per revocare l'accesso rimuovere il dispositivo abbinato nel gateway e l'abbinamento nell'app. Lasciare intatti gli altri servizi Serve.

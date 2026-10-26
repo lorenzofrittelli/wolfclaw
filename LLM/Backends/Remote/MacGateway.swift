@@ -162,15 +162,55 @@ enum PairOriginPolicy {
     }
 }
 
+/// Tailscale Serve termina HTTPS e inoltra soltanto all'ascolto locale del Mac.
+/// La modalità LAN resta disponibile per le installazioni precedenti.
+enum GatewayListenMode: String, CaseIterable, Sendable {
+    case lan
+    case loopbackOnly
+
+    static let defaultsKey = "PhoneClaw.gateway.listenMode"
+
+    static func stored(_ rawValue: String?) -> GatewayListenMode {
+        guard let rawValue else { return .lan }
+        // Una preferenza non valida non deve allargare l'accesso alla rete.
+        return GatewayListenMode(rawValue: rawValue) ?? .loopbackOnly
+    }
+
+    var advertisesBonjour: Bool { self == .lan }
+
+    func listenerParameters(port: UInt16) throws -> NWParameters {
+        guard port != 0, let port = NWEndpoint.Port(rawValue: port) else {
+            throw NSError(domain: "MacGateway", code: 1, userInfo: [NSLocalizedDescriptionKey: "bad port"])
+        }
+        let parameters = NWParameters.tcp
+        if self == .loopbackOnly {
+            parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: port)
+        }
+        return parameters
+    }
+}
+
+enum GatewayPairApprovalPolicy {
+    static func approve(
+        deviceName: String,
+        using approval: (@Sendable (String) async -> Bool)?
+    ) async -> Bool {
+        guard !Task.isCancelled, let approval else { return false }
+        let approved = await approval(deviceName)
+        return approved && !Task.isCancelled
+    }
+}
+
 // MARK: - 网关
 
 final class MacGateway {
     let port: UInt16
+    let listenMode: GatewayListenMode
     private let macID: String
     private let name: String
     private let providers: [GatewayProvider]
     private let defaultProviderID: String
-    /// 配对审批: 手机请求配对时调用 (传设备名, 返回是否允许)。nil = 自动允许 (CLI / 无 UI)。
+    /// Ogni associazione richiede approvazione esplicita; senza callback viene negata.
     private let onPairRequest: (@Sendable (String) async -> Bool)?
     /// 配对设备列表变化时通知 (给 UI 刷新)。
     private let onPairedChanged: (@Sendable () -> Void)?
@@ -183,11 +223,13 @@ final class MacGateway {
     init(
         port: UInt16, macID: String, name: String,
         providers: [GatewayProvider], defaultProviderID: String,
+        listenMode: GatewayListenMode = .lan,
         onPairRequest: (@Sendable (String) async -> Bool)? = nil,
         onPairedChanged: (@Sendable () -> Void)? = nil,
         onRuntimeEvent: (@Sendable (String) -> Void)? = nil
     ) {
         self.port = port; self.macID = macID; self.name = name
+        self.listenMode = listenMode
         self.providers = providers; self.defaultProviderID = defaultProviderID
         self.onPairRequest = onPairRequest
         self.onPairedChanged = onPairedChanged
@@ -199,19 +241,32 @@ final class MacGateway {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw NSError(domain: "MacGateway", code: 1, userInfo: [NSLocalizedDescriptionKey: "bad port"])
         }
-        let listener = try NWListener(using: .tcp, on: nwPort)
+        let parameters = try listenMode.listenerParameters(port: port)
+        let listener: NWListener
+        if listenMode == .loopbackOnly {
+            // requiredLocalEndpoint contiene già indirizzo e porta: ripassarli
+            // nell'initializer on: produce EINVAL nel framework Network.
+            listener = try NWListener(using: parameters)
+        } else {
+            listener = try NWListener(using: parameters, on: nwPort)
+        }
         // 同一个 listener 既 serve HTTP 又广播 Bonjour —— 不能再开第二个 listener 抢同端口。
-        listener.service = NWListener.Service(
-            name: name, type: LANService.type, domain: nil,
-            txtRecord: LANService.txtData(macID: macID)
-        )
+        if listenMode.advertisesBonjour {
+            listener.service = NWListener.Service(
+                name: name, type: LANService.type, domain: nil,
+                txtRecord: LANService.txtData(macID: macID)
+            )
+        }
         listener.newConnectionHandler = { [weak self] conn in self?.accept(conn) }
         let runtimeEvent = onRuntimeEvent
         let port = port
+        let listenMode = listenMode
         listener.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                runtimeEvent?("运行中 · 端口 \(port)")
+                runtimeEvent?(listenMode == .loopbackOnly
+                    ? "Tailscale · locale 127.0.0.1:\(port)"
+                    : "运行中 · 端口 \(port)")
             case .failed(let e):
                 print("[gateway] listener failed: \(e)")
                 runtimeEvent?("启动失败: \(e.localizedDescription)")
@@ -223,7 +278,8 @@ final class MacGateway {
         }
         listener.start(queue: .global())
         self.listener = listener
-        print("[gateway] serving :\(port) · providers=[\(providers.map { $0.id }.joined(separator: ","))] · 广播 \(LANService.type) id=\(macID)")
+        let address = listenMode == .loopbackOnly ? "127.0.0.1:\(port)" : ":\(port)"
+        print("[gateway] serving \(address) · providers=[\(providers.map { $0.id }.joined(separator: ","))] · bonjour=\(listenMode.advertisesBonjour) id=\(macID)")
     }
 
     func stop() {
@@ -271,14 +327,14 @@ final class MacGateway {
             sendJSON(conn, 200, body)
             return
         }
-        // 配对端点: 经审批 (onPairRequest; nil 则自动允许) → 记录设备 + 签发 token。
+        // Il token viene emesso soltanto dopo il consenso esplicito sul Mac.
         if req.method == "POST", req.path == "/pair" {
             guard isAllowedPairOrigin(req) else {
                 sendStatus(conn, 403, "Pairing origin denied")
                 return
             }
             let deviceName = GatewayBody.deviceName(req.body) ?? "未知设备"
-            let approved = await (onPairRequest?(deviceName) ?? true)
+            let approved = await GatewayPairApprovalPolicy.approve(deviceName: deviceName, using: onPairRequest)
             guard approved else { sendStatus(conn, 403, "Pairing denied"); return }
             let token = GatewayCredentialStore.randomToken()
             guard recordPairedDevice(name: deviceName, token: token) else {

@@ -547,7 +547,7 @@ struct ConfigurationsView: View {
             Button { showRemoteMac = true } label: {
                 HStack(spacing: 12) {
                     Image(systemName: "desktopcomputer")
-                    Text(tr("连接局域网内的 Mac", "Connect to a Mac on your LAN", "同じLAN内のMacに接続"))
+                    Text(L10n.Remote.connectToMac)
                     Spacer()
                     Image(systemName: "chevron.right").foregroundStyle(SettingsStyle.secondary)
                 }
