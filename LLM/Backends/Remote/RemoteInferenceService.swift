@@ -405,7 +405,7 @@ struct ChatCompletionsLanguageModel: LanguageModel, Sendable {
     let authToken: String?
 
     var capabilities: LanguageModelCapabilities {
-        LanguageModelCapabilities(capabilities: [])
+        LanguageModelCapabilities([])
     }
 
     var executorConfiguration: ChatCompletionsLanguageModelExecutor.Configuration {
@@ -562,8 +562,6 @@ struct ChatCompletionsLanguageModelExecutor: LanguageModelExecutor {
             return structure.content.jsonString
         case .attachment(let attachment):
             return attachment.description
-        case .custom(let custom):
-            return custom.description
         @unknown default:
             return segment.description
         }

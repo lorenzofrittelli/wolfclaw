@@ -121,7 +121,6 @@
 		AA1000000000000000000023 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = AA5000000000000000000009 /* MarkdownUI */; };
 		AA1000000000000000000030 /* PhoneClawEngine in Frameworks */ = {isa = PBXBuildFile; productRef = AA5000000000000000000010 /* PhoneClawEngine */; };
 		AA1000000000000000000031 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA5000000000000000000011 /* WhisperKit */; };
-		AA1000000000000000000032 /* piper_plus.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA2000000000000000000026 /* piper_plus.xcframework */; };
 		AA1000000000000000000033 /* open_jtalk_dic_utf_8-1.11 in Resources */ = {isa = PBXBuildFile; fileRef = AA2000000000000000000027 /* open_jtalk_dic_utf_8-1.11 */; };
 		AA1000000000000000000100 /* BundledModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2000000000000000000100 /* BundledModel.swift */; };
 		AA1000000000000000000101 /* RuntimeBudgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2000000000000000000101 /* RuntimeBudgets.swift */; };
@@ -447,7 +446,6 @@
 				AA1000000000000000000023 /* MarkdownUI in Frameworks */,
 				AA1000000000000000000030 /* PhoneClawEngine in Frameworks */,
 				AA1000000000000000000031 /* WhisperKit in Frameworks */,
-				AA1000000000000000000032 /* piper_plus.xcframework in Frameworks */,
 				BD75E7E5620A8FF0A868E9F0 /* libPods-PhoneClaw.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1423,6 +1421,12 @@
 					"$(inherited)",
 					"$(SRCROOT)/Frameworks/sherpa-onnx.xcframework/ios-arm64/Headers",
 				);
+				/* Piper Plus è disponibile solo sul dispositivo; il simulatore usa il fallback esistente. */
+				"HEADER_SEARCH_PATHS[sdk=iphoneos*]" = (
+					"$(inherited)",
+					"$(SRCROOT)/Frameworks/sherpa-onnx.xcframework/ios-arm64/Headers",
+					"$(SRCROOT)/Frameworks/piper_plus.xcframework/ios-arm64/Headers",
+				);
 				INFOPLIST_FILE = Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1432,12 +1436,14 @@
 					"$(inherited)",
 					"$(SRCROOT)/Frameworks/onnxruntime.xcframework/ios-arm64",
 					"$(SRCROOT)/Frameworks/sherpa-onnx.xcframework/ios-arm64",
+					"$(SRCROOT)/Frameworks/piper_plus.xcframework/ios-arm64",
 				);
 				MARKETING_VERSION = 1.4.0;
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
 					"$(inherited)",
 					"-lonnxruntime",
 					"-lsherpa-onnx",
+					"-lpiper_plus",
 					"-lc++",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.kellyvv.phoneclaw;
@@ -1462,6 +1468,12 @@
 					"$(inherited)",
 					"$(SRCROOT)/Frameworks/sherpa-onnx.xcframework/ios-arm64/Headers",
 				);
+				/* Piper Plus è disponibile solo sul dispositivo; il simulatore usa il fallback esistente. */
+				"HEADER_SEARCH_PATHS[sdk=iphoneos*]" = (
+					"$(inherited)",
+					"$(SRCROOT)/Frameworks/sherpa-onnx.xcframework/ios-arm64/Headers",
+					"$(SRCROOT)/Frameworks/piper_plus.xcframework/ios-arm64/Headers",
+				);
 				INFOPLIST_FILE = Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1471,12 +1483,14 @@
 					"$(inherited)",
 					"$(SRCROOT)/Frameworks/onnxruntime.xcframework/ios-arm64",
 					"$(SRCROOT)/Frameworks/sherpa-onnx.xcframework/ios-arm64",
+					"$(SRCROOT)/Frameworks/piper_plus.xcframework/ios-arm64",
 				);
 				MARKETING_VERSION = 1.4.0;
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
 					"$(inherited)",
 					"-lonnxruntime",
 					"-lsherpa-onnx",
+					"-lpiper_plus",
 					"-lc++",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.kellyvv.phoneclaw;
